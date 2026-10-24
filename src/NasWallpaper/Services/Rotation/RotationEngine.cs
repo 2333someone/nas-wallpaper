@@ -289,6 +289,15 @@ public sealed class RotationEngine : IAsyncDisposable
 
         using var media = new SourceLease(profile.Source);
         var chosen = await PickNextAsync(profile, state, media.Value, ct);
+        await ApplyChosenAsync(profile, state, media.Value, chosen, trackHistory: true, ct);
+    }
+
+    /// <summary>把选中的图片应用到桌面（NAS 原图直连，WebDAV 下载后应用）。</summary>
+    private async Task ApplyChosenAsync(
+        MonitorConfig profile, MonitorRuntime state, IImageSource source,
+        SourceFile chosen, bool trackHistory, CancellationToken ct)
+    {
+        var previousLocation = state.LastSourcePath;
         string appliedPath;
         string message;
         if (IsDirectSource(profile.Source.Kind))
@@ -305,7 +314,7 @@ public sealed class RotationEngine : IAsyncDisposable
                 UnauthorizedAccessException or NotSupportedException)
             {
                 // 个别环境不接受 UNC 路径，退回“下载到缓存再设置”。
-                var cached = await _cache.EnsureAsync(media.Value, chosen, profile.Orientation, ct)
+                var cached = await _cache.EnsureAsync(source, chosen, profile.Orientation, ct)
                     ?? throw new IOException("系统无法直接使用该网络路径，缓存副本也失败了。", ex);
                 appliedPath = cached.Path;
                 state.FallbackPath = cached.Path;
@@ -316,7 +325,7 @@ public sealed class RotationEngine : IAsyncDisposable
         else
         {
             // WebDAV 是 HTTP 资源，系统无法直接当壁纸，只能先下载。
-            var cached = await _cache.EnsureAsync(media.Value, chosen, profile.Orientation, ct)
+            var cached = await _cache.EnsureAsync(source, chosen, profile.Orientation, ct)
                 ?? throw new IOException("图片下载失败");
             appliedPath = cached.Path;
             state.FallbackPath = cached.Path;
@@ -324,6 +333,7 @@ public sealed class RotationEngine : IAsyncDisposable
             message = "来自 WebDAV · 已缓存";
         }
 
+        if (trackHistory) state.PreviousPath = previousLocation;
         state.CurrentImage = appliedPath;
         state.LastSourcePath = chosen.Location;
         state.CurrentName = Path.GetFileName(chosen.Location);
@@ -336,6 +346,46 @@ public sealed class RotationEngine : IAsyncDisposable
             if (current is not null) current.LastWallpaperPath = appliedPath;
         }
         SaveState();
+    }
+
+    /// <summary>回到上一张：直接应用“上一张”记录的那张图（本地/SMB 用原图，WebDAV 用缓存副本）。</summary>
+    public async Task PreviousAsync(string? monitorId = null)
+    {
+        MonitorConfig[] profiles;
+        lock (_sync)
+            profiles = _config.Monitors.Where(p => p.Enabled &&
+                (monitorId is null || p.MonitorId == monitorId)).Select(p => p.CloneMonitor()).ToArray();
+
+        foreach (var profile in profiles)
+        {
+            var gate = _monitorLocks.GetOrAdd(profile.MonitorId, _ => new(1, 1));
+            if (!await gate.WaitAsync(0)) continue;
+            try
+            {
+                var state = _states[profile.MonitorId];
+                var previous = state.PreviousPath;
+                var file = string.IsNullOrWhiteSpace(previous) || state.Files is null
+                    ? null
+                    : state.Files.FirstOrDefault(f =>
+                        string.Equals(f.Location, previous, StringComparison.OrdinalIgnoreCase));
+                if (file is null)
+                {
+                    state.Message = "没有上一张";
+                    continue;
+                }
+
+                using var media = new SourceLease(profile.Source);
+                await ApplyChosenAsync(profile, state, media.Value, file, trackHistory: false, CancellationToken.None);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                System.Runtime.InteropServices.COMException or NotSupportedException or HttpRequestException)
+            {
+                if (_states.TryGetValue(profile.MonitorId, out var failed))
+                    failed.Message = "无法显示上一张：" + DescribeFailure(ex);
+            }
+            finally { gate.Release(); }
+        }
+        Changed?.Invoke();
     }
 
     private static bool IsDirectSource(SourceKind kind) =>
@@ -587,6 +637,7 @@ public sealed class RotationEngine : IAsyncDisposable
         public string? CurrentImage;
         public string? CurrentName;
         public string? LastSourcePath;
+        public string? PreviousPath;
         public string? FallbackPath;
         public string Message = "等待配置";
         public DateTimeOffset LastScan = DateTimeOffset.MinValue;

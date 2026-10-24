@@ -37,6 +37,7 @@ public partial class SettingsWindow : Window
 
     public event Func<AppConfig, Task>? SaveRequested;
     public event Func<Task>? NextRequested;
+    public event Func<Task>? PreviousRequested;
     public event Func<Task<bool>>? PauseRequested;
     public event Func<IReadOnlyList<MonitorStatus>>? StatusRequested;
     public event Func<string, string?, Task<bool>>? DeleteImageRequested;
@@ -401,6 +402,11 @@ public partial class SettingsWindow : Window
             _viewModel.Message = "无法保存：" + ex.Message;
             ShowToast("无法保存：" + ex.Message, error: true);
         }
+    }
+
+    private async void Previous_Click(object sender, RoutedEventArgs e)
+    {
+        if (PreviousRequested is not null) await PreviousRequested();
     }
 
     private async void Next_Click(object sender, RoutedEventArgs e)

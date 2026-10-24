@@ -92,6 +92,7 @@ public partial class App : System.Windows.Application
             _settings.ShowPendingUpdate(_pendingUpdate);
             _settings.SaveRequested += SaveConfig;
             _settings.NextRequested += () => _engine?.NextAsync() ?? Task.CompletedTask;
+            _settings.PreviousRequested += () => _engine?.PreviousAsync() ?? Task.CompletedTask;
             _settings.PauseRequested += TogglePause;
             _settings.StatusRequested += () => _engine?.GetStatuses() ?? [];
             _settings.CheckUpdateRequested += CheckUpdateAsync;
