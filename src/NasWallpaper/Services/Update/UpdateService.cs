@@ -108,7 +108,7 @@ public static class UpdateService
         var fragmentUrl = $"https://github.com/{repository}/releases/expanded_assets/{Uri.EscapeDataString(tag)}";
         var html = await Client.GetStringAsync(fragmentUrl, ct).ConfigureAwait(false);
 
-        string? preferred = null;
+        string? selfContained = null;
         string? fallback = null;
         foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
             html, "href=\"(?<u>[^\"]*/releases/download/[^\"]+\\.exe)\"",
@@ -119,20 +119,20 @@ public static class UpdateService
                 ? value
                 : "https://github.com" + value;
             var name = Path.GetFileName(new Uri(url).AbsolutePath);
-            if (name.Equals("NAS Wallpaper.exe", StringComparison.OrdinalIgnoreCase)) return url;
-            if (IsPreferredAsset(name)) preferred ??= url;
+            if (IsSelfContainedAsset(name)) selfContained ??= url;
             fallback ??= url;
         }
 
-        return preferred
+        return selfContained
             ?? fallback
-            ?? $"https://github.com/{repository}/releases/download/{tag}/NAS Wallpaper.exe";
+            ?? $"https://github.com/{repository}/releases/download/{tag}/NAS-Wallpaper.exe";
     }
 
-    /// <summary>同一版本可能同时提供自包含版和框架依赖版，自包含版更适合直接替换。</summary>
-    private static bool IsPreferredAsset(string name) =>
-        name.Contains("NAS Wallpaper", StringComparison.OrdinalIgnoreCase) &&
-        !name.Contains("framework", StringComparison.OrdinalIgnoreCase);
+    /// <summary>自包含版：名字形如 NAS Wallpaper.exe / NAS.Wallpaper.exe / NAS-Wallpaper.exe，且不含 framework。</summary>
+    private static bool IsSelfContainedAsset(string name) =>
+        !name.Contains("framework", StringComparison.OrdinalIgnoreCase) &&
+        System.Text.RegularExpressions.Regex.IsMatch(
+            name, @"^NAS[ ._-]?Wallpaper\.exe$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     private static async Task<UpdateInfo?> CheckViaApiAsync(string repository, CancellationToken ct)
     {
@@ -165,32 +165,24 @@ public static class UpdateService
         long size = 0;
         if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
         {
-            string? fallbackName = null, fallbackUrl = null;
-            long fallbackSize = 0;
+            // GitHub 会把资产名里的空格改成点/横线，所以按“自包含版优先、体积最大”挑选。
+            var candidates = new List<(string Name, string Url, long Size)>();
             foreach (var asset in assets.EnumerateArray())
             {
                 var name = asset.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
                 if (!name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
                 var url = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
                 var bytes = asset.TryGetProperty("size", out var s) && s.TryGetInt64(out var b) ? b : 0;
-
-                if (name.Equals("NAS Wallpaper.exe", StringComparison.OrdinalIgnoreCase))
-                {
-                    assetName = name; downloadUrl = url; size = bytes;
-                    break;
-                }
-                if (IsPreferredAsset(name))
-                {
-                    assetName = name; downloadUrl = url; size = bytes;
-                }
-                else if (fallbackName is null)
-                {
-                    fallbackName = name; fallbackUrl = url; fallbackSize = bytes;
-                }
+                candidates.Add((name, url ?? "", bytes));
             }
-            assetName ??= fallbackName;
-            downloadUrl ??= fallbackUrl;
-            if (size == 0) size = fallbackSize;
+
+            var pick = candidates
+                .OrderByDescending(c => IsSelfContainedAsset(c.Name) ? 1 : 0)
+                .ThenByDescending(c => c.Size)
+                .FirstOrDefault();
+            assetName = pick.Name;
+            downloadUrl = pick.Url;
+            size = pick.Size;
         }
 
         if (string.IsNullOrWhiteSpace(downloadUrl))

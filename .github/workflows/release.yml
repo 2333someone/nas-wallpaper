@@ -38,7 +38,7 @@ jobs:
             -p:Version=$version -o out/framework
           if ($LASTEXITCODE -ne 0) { throw "framework-dependent publish failed" }
 
-          Copy-Item 'out/selfcontained/NAS Wallpaper.exe' 'out/NAS Wallpaper.exe'
+          Copy-Item 'out/selfcontained/NAS Wallpaper.exe' 'out/NAS-Wallpaper.exe'
           Copy-Item 'out/framework/NAS Wallpaper.exe' 'out/NAS-Wallpaper-framework-dependent.exe'
 
       - name: Create GitHub release
@@ -47,7 +47,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create ${{ github.ref_name }} `
-            "out/NAS Wallpaper.exe" `
+            "out/NAS-Wallpaper.exe" `
             "out/NAS-Wallpaper-framework-dependent.exe" `
             --title "NAS Wallpaper ${{ github.ref_name }}" `
             --generate-notes
