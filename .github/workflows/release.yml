@@ -1,0 +1,53 @@
+name: release
+
+# 推一个 v 开头的 tag 就会自动构建并发布到 GitHub Releases，
+# 应用里的“检查更新”读的就是这里产出的资产。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish single-file builds
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if (-not $version) { $version = '0.1.0' }
+          Write-Host "version = $version"
+
+          dotnet publish src/NasWallpaper/NasWallpaper.csproj -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=None -p:DebugSymbols=false -p:Version=$version -o out/selfcontained
+          if ($LASTEXITCODE -ne 0) { throw "self-contained publish failed" }
+
+          dotnet publish src/NasWallpaper/NasWallpaper.csproj -c Release -r win-x64 --self-contained false `
+            -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false `
+            -p:Version=$version -o out/framework
+          if ($LASTEXITCODE -ne 0) { throw "framework-dependent publish failed" }
+
+          Copy-Item 'out/selfcontained/NAS Wallpaper.exe' 'out/NAS Wallpaper.exe'
+          Copy-Item 'out/framework/NAS Wallpaper.exe' 'out/NAS-Wallpaper-framework-dependent.exe'
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ github.ref_name }} `
+            "out/NAS Wallpaper.exe" `
+            "out/NAS-Wallpaper-framework-dependent.exe" `
+            --title "NAS Wallpaper ${{ github.ref_name }}" `
+            --generate-notes

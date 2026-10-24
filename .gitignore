@@ -1,0 +1,8 @@
+bin/
+obj/
+artifacts/
+publish/
+.vs/
+*.user
+TestResults/
+industrial-hmi/

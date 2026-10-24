@@ -1,0 +1,98 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ==== 基础表面 ==== -->
+    <SolidColorBrush x:Key="Bg" Color="#F6F7F9" />
+    <SolidColorBrush x:Key="Surface" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="SurfaceHi" Color="#FAFBFC" />
+    <SolidColorBrush x:Key="SurfaceInset" Color="#F8F9FB" />
+    <SolidColorBrush x:Key="TileBg" Color="#F7F8FA" />
+    <SolidColorBrush x:Key="Field" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="FieldHover" Color="#FAFBFC" />
+    <SolidColorBrush x:Key="FieldFocus" Color="#F7F8FA" />
+
+    <!-- ==== 交互态 ==== -->
+    <SolidColorBrush x:Key="NavHover" Color="#F2F3F5" />
+    <SolidColorBrush x:Key="RowHover" Color="#FAFAFB" />
+    <SolidColorBrush x:Key="Btn" Color="#F4F5F6" />
+    <SolidColorBrush x:Key="BtnHover" Color="#ECEEF0" />
+    <SolidColorBrush x:Key="BtnPressed" Color="#E2E5E8" />
+    <SolidColorBrush x:Key="IconBtnHover" Color="#F0F1F3" />
+    <SolidColorBrush x:Key="ChipBg" Color="#F3F4F6" />
+    <SolidColorBrush x:Key="BadgeBg" Color="#F5F6F8" />
+    <SolidColorBrush x:Key="FooterBg" Color="#FAFBFC" />
+    <SolidColorBrush x:Key="ToastBg" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="ToastStroke" Color="#E2E5E9" />
+    <SolidColorBrush x:Key="TooltipBg" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="TooltipStroke" Color="#DFE2E6" />
+
+    <!-- ==== 线条与文本 ==== -->
+    <SolidColorBrush x:Key="Stroke" Color="#E5E7EB" />
+    <SolidColorBrush x:Key="StrokeHi" Color="#C9CDD4" />
+    <SolidColorBrush x:Key="TextPrimary" Color="#14161A" />
+    <SolidColorBrush x:Key="TextSecondary" Color="#5B616B" />
+    <SolidColorBrush x:Key="TextTertiary" Color="#8A909B" />
+
+    <!-- ==== 控件细节 ==== -->
+    <SolidColorBrush x:Key="TrackOff" Color="#D9DDE2" />
+    <SolidColorBrush x:Key="KnobOff" Color="#B9BEC6" />
+    <SolidColorBrush x:Key="ScrollThumb" Color="#D6DAE0" />
+    <SolidColorBrush x:Key="ScrollThumbHover" Color="#C2C7CF" />
+    <SolidColorBrush x:Key="ScrollThumbDrag" Color="#AAB0B9" />
+    <SolidColorBrush x:Key="ShadeBrush" Color="#000000" />
+
+    <!-- ==== 品牌色（中性石墨，不用紫色） ==== -->
+    <SolidColorBrush x:Key="Accent" Color="#1F2328" />
+    <SolidColorBrush x:Key="AccentText" Color="#111418" />
+    <SolidColorBrush x:Key="AccentSoft" Color="#1F2328" Opacity="0.08" />
+    <SolidColorBrush x:Key="OnAccent" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="Success" Color="#0E9F6E" />
+    <SolidColorBrush x:Key="Danger" Color="#DE3B3B" />
+    <SolidColorBrush x:Key="DangerText" Color="#C13030" />
+    <SolidColorBrush x:Key="DangerSoft" Color="#FBEAEA" />
+
+    <Color x:Key="ShadowColor">#243052</Color>
+    <Color x:Key="GlowColor">#7B68FF</Color>
+    <Color x:Key="HeroShadowColor">#000000</Color>
+
+    <LinearGradientBrush x:Key="AccentGradient" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#2E3238" Offset="0" />
+        <GradientStop Color="#15181C" Offset="1" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="HeroGradient" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#FFFFFF" Offset="0" />
+        <GradientStop Color="#FCFDFE" Offset="1" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="HeroBorder" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#E5E7EB" Offset="0" />
+        <GradientStop Color="#EDEFF2" Offset="1" />
+    </LinearGradientBrush>
+
+    <RadialGradientBrush x:Key="GlowPrimary">
+        <GradientStop Color="#00FFFFFF" Offset="0" />
+        <GradientStop Color="#00FFFFFF" Offset="1" />
+    </RadialGradientBrush>
+
+    <RadialGradientBrush x:Key="GlowSecondary">
+        <GradientStop Color="#00FFFFFF" Offset="0" />
+        <GradientStop Color="#00FFFFFF" Offset="1" />
+    </RadialGradientBrush>
+
+    <RadialGradientBrush x:Key="HeroRing">
+        <GradientStop Color="#F2F4F7" Offset="0" />
+        <GradientStop Color="#00F2F4F7" Offset="1" />
+    </RadialGradientBrush>
+
+    <!-- ==== 主视觉区 ==== -->
+    <SolidColorBrush x:Key="HeroTitle" Color="#14161A" />
+    <SolidColorBrush x:Key="HeroBody" Color="#5B616B" />
+    <SolidColorBrush x:Key="HeroMuted" Color="#8A909B" />
+    <SolidColorBrush x:Key="HeroGhostBg" Color="#FFFFFF" />
+    <SolidColorBrush x:Key="HeroGhostBorder" Color="#DDE0E5" />
+    <SolidColorBrush x:Key="HeroGhostHoverBg" Color="#F4F5F7" />
+    <SolidColorBrush x:Key="HeroGhostPressedBg" Color="#EBEDF0" />
+    <SolidColorBrush x:Key="HeroRingStroke" Color="#E8EAEE" />
+    <SolidColorBrush x:Key="HeroRingStrokeSoft" Color="#F0F2F5" />
+</ResourceDictionary>
