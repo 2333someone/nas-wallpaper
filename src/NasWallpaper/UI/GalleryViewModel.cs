@@ -1,4 +1,5 @@
 using NasWallpaper.Models;
+using NasWallpaper.Services.Preview;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows.Media.Imaging;
@@ -56,6 +57,8 @@ public sealed class GalleryImage(SourceFile file) : ObservableObject
 {
     private BitmapSource? _thumbnail;
     private bool _failed;
+    private int _sourceWidth;
+    private int _sourceHeight;
 
     public SourceFile File { get; } = file;
     public string Name => Path.GetFileName(File.Location);
@@ -67,7 +70,6 @@ public sealed class GalleryImage(SourceFile file) : ObservableObject
         {
             if (!SetField(ref _thumbnail, value)) return;
             OnPropertyChanged(nameof(HasThumbnail));
-            OnPropertyChanged(nameof(DetailText));
         }
     }
 
@@ -83,6 +85,16 @@ public sealed class GalleryImage(SourceFile file) : ObservableObject
 
     public bool HasThumbnail => _thumbnail is not null;
 
+    /// <summary>把加载结果写进卡片；尺寸用原图分辨率，而不是缩略图分辨率。</summary>
+    public void ApplyPreview(PreviewImage? preview)
+    {
+        Thumbnail = preview?.Image;
+        _sourceWidth = preview?.Width ?? 0;
+        _sourceHeight = preview?.Height ?? 0;
+        Failed = preview is null;
+        OnPropertyChanged(nameof(DetailText));
+    }
+
     public string DetailText
     {
         get
@@ -90,8 +102,8 @@ public sealed class GalleryImage(SourceFile file) : ObservableObject
             var size = File.Length >= 1024 * 1024
                 ? $"{File.Length / 1024d / 1024d:0.#} MB"
                 : $"{Math.Max(1, File.Length / 1024)} KB";
-            if (_thumbnail is { } image)
-                return $"{size} · {image.PixelWidth}×{image.PixelHeight}";
+            if (_sourceWidth > 0 && _sourceHeight > 0)
+                return $"{size} · {_sourceWidth}×{_sourceHeight}";
             return _failed ? "无法预览" : size;
         }
     }

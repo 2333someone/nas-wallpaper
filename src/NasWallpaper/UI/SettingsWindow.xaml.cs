@@ -270,10 +270,9 @@ public partial class SettingsWindow : Window
 
         try
         {
-            var thumbnail = await loader.LoadAsync(item.File, ThumbnailWidth, token);
+            var preview = await loader.LoadAsync(item.File, ThumbnailWidth, token);
             if (token.IsCancellationRequested) return;
-            item.Thumbnail = thumbnail;
-            item.Failed = thumbnail is null;
+            item.ApplyPreview(preview);
         }
         catch (OperationCanceledException) { }
         finally

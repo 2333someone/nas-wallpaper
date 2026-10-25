@@ -1,8 +1,8 @@
 using NasWallpaper.Models;
+using NasWallpaper.Services.Preview;
 using System.IO;
 using System.Windows;
 using System.Windows.Input;
-using System.Windows.Media.Imaging;
 using Brush = System.Windows.Media.Brush;
 
 namespace NasWallpaper.UI;
@@ -13,7 +13,7 @@ namespace NasWallpaper.UI;
 public partial class ImageViewerWindow : Window
 {
     private readonly List<SourceFile> _files;
-    private readonly Func<SourceFile, CancellationToken, Task<BitmapSource?>> _load;
+    private readonly Func<SourceFile, CancellationToken, Task<PreviewImage?>> _load;
     private readonly Func<SourceFile, Task<bool>> _apply;
     private readonly Func<SourceFile, Task<bool>> _delete;
     private readonly string _monitorName;
@@ -28,7 +28,7 @@ public partial class ImageViewerWindow : Window
         string monitorName,
         IReadOnlyList<SourceFile> files,
         int index,
-        Func<SourceFile, CancellationToken, Task<BitmapSource?>> load,
+        Func<SourceFile, CancellationToken, Task<PreviewImage?>> load,
         Func<SourceFile, Task<bool>> apply,
         Func<SourceFile, Task<bool>> delete)
     {
@@ -75,17 +75,17 @@ public partial class ImageViewerWindow : Window
 
         try
         {
-            var image = await _load(file, ct);
+            var preview = await _load(file, ct);
             if (ct.IsCancellationRequested) return;
-            if (image is null)
+            if (preview is null)
             {
                 StatusText.Text = "无法载入这张图片";
                 return;
             }
-            ViewerImage.Source = image;
+            ViewerImage.Source = preview.Image;
             StatusText.Text = "";
             PreviewSizeText.Text =
-                $"{FormatSize(file.Length)} · {image.PixelWidth}×{image.PixelHeight}";
+                $"{FormatSize(file.Length)} · {preview.Width}×{preview.Height}";
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or

@@ -1,6 +1,7 @@
 using NasWallpaper.Models;
 using NasWallpaper.Services.Cache;
 using NasWallpaper.Services.Configuration;
+using NasWallpaper.Services.Preview;
 using NasWallpaper.Services.Rotation;
 using NasWallpaper.Services.Sources;
 using NasWallpaper.Services.Update;
@@ -307,6 +308,34 @@ public sealed class CoreTests : IDisposable
         var files = await engine.GetImagesAsync("display-1", refresh: true, default);
 
         Assert.Equal(2, files.Count);
+    }
+
+    [Fact]
+    public async Task ThumbnailLoaderDecodesLocalImageAndWritesCache()
+    {
+        var source = Path.Combine(_root, "pictures");
+        var path = Path.Combine(source, "wallpaper.jpg");
+        CreateImage(path, 1920, 1080);
+        var info = new FileInfo(path);
+        var file = new SourceFile(info.FullName, info.Length, info.LastWriteTimeUtc);
+
+        var cache = new ImageCache(Path.Combine(_root, "cache"));
+        using var loader = new GalleryThumbnailLoader(
+            new SourceConfig { Kind = SourceKind.Local, Address = source }, cache);
+
+        var preview = await loader.LoadAsync(file, 240, default);
+
+        Assert.NotNull(preview);
+        Assert.Equal(1920, preview!.Width);
+        Assert.Equal(1080, preview.Height);
+        Assert.True(preview.Image.IsFrozen);
+        Assert.InRange(preview.Image.PixelWidth, 1, 240);
+        Assert.NotEmpty(Directory.GetFiles(cache.Root, "thumb-*.cache"));
+
+        // 第二次命中缩略图缓存，尺寸仍来自文件名而不是缩略图本身。
+        var cached = await loader.LoadAsync(file, 240, default);
+        Assert.NotNull(cached);
+        Assert.Equal(1920, cached!.Width);
     }
 
     private string Write(string name, int length)
