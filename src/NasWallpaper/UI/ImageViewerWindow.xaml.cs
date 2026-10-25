@@ -189,7 +189,7 @@ public partial class ImageViewerWindow : Window
         if (DeleteButton is null) return;
 
         DeleteButton.Content = pending ? "再点一次删除" : "删除这张";
-        DeleteButton.Foreground = (Brush)FindResource(pending ? "Danger" : "TextTertiary");
+        DeleteButton.Foreground = (Brush)FindResource(pending ? "Danger" : "TextSecondary");
         if (!pending) return;
 
         var token = _deleteConfirmToken;

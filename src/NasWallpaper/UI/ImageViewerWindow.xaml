@@ -25,7 +25,8 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="Bg" CornerRadius="10" Background="{DynamicResource Btn}"
-                                BorderBrush="{DynamicResource Stroke}" BorderThickness="1">
+                                BorderBrush="{DynamicResource Stroke}" BorderThickness="1"
+                                Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <ControlTemplate.Triggers>
@@ -50,7 +51,8 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="Bg" CornerRadius="10" Background="{DynamicResource AccentGradient}">
+                        <Border x:Name="Bg" CornerRadius="10" Background="{DynamicResource AccentGradient}"
+                                Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Border>
                         <ControlTemplate.Triggers>
@@ -127,6 +129,11 @@
         <Border Grid.Row="2" Background="{DynamicResource Surface}"
                 BorderBrush="{DynamicResource Stroke}" BorderThickness="0,1,0,0">
             <Grid Margin="18,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                     <Button x:Name="PreviousButton" Style="{StaticResource ViewerButton}" Click="Previous_Click"
                             ToolTip="上一张 (←)">
@@ -146,12 +153,14 @@
                     </Button>
                 </StackPanel>
 
-                <TextBlock x:Name="PreviewSizeText" FontSize="11.5" Foreground="{DynamicResource TextTertiary}"
-                           HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="NoWrap" />
+                <TextBlock x:Name="PreviewSizeText" Grid.Column="1" FontSize="11.5"
+                           Foreground="{DynamicResource TextTertiary}" Margin="16,0"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
 
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button x:Name="DeleteButton" Style="{StaticResource ViewerButton}" Content="删除这张"
-                            Foreground="{DynamicResource TextTertiary}" Click="Delete_Click"
+                            Foreground="{DynamicResource TextSecondary}" Click="Delete_Click"
                             ToolTip="从 NAS 上删除这张原图（需要再点一次确认）" />
                     <Button x:Name="ApplyButton" Style="{StaticResource ViewerPrimaryButton}" Click="Apply_Click"
                             Margin="8,0,0,0" ToolTip="立即设为这台显示器的壁纸 (Enter)">
