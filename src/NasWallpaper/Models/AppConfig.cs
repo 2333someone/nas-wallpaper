@@ -25,7 +25,7 @@ public sealed class AppConfig
     public string CacheDirectory { get; set; } = "";
 
     /// <summary>GitHub 仓库（owner/repo），留空则关闭在线更新。</summary>
-    public string UpdateRepository { get; set; } = "";
+    public string UpdateRepository { get; set; } = "2333someone/nas-wallpaper";
 
     /// <summary>启动时自动检查新版本。</summary>
     public bool CheckUpdates { get; set; } = true;
@@ -90,6 +90,9 @@ public sealed record SourceFile(string Location, long Length, DateTimeOffset Las
 public sealed record CachedImage(string Path, string Key, long Length, DateTimeOffset LastWriteUtc, string Name = "");
 
 public sealed record DisplayInfo(string Id, string Name, int Width, int Height, bool IsPrimary);
+
+/// <summary>拖拽导入图片的结果：成功与否，以及给用户看的一句话。</summary>
+public sealed record ImportImageResult(bool Success, string Message);
 
 public sealed record MonitorStatus(
     string MonitorId,

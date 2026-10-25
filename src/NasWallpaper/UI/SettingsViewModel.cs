@@ -13,6 +13,7 @@ public sealed class SettingsViewModel : ObservableObject
 
     public AppConfig Config { get; private set; } = new();
     public ObservableCollection<MonitorViewModel> Monitors { get; } = [];
+    public GalleryViewModel Gallery { get; } = new();
     public string Message { get => _message; set { if (SetField(ref _message, value)) OnPropertyChanged(nameof(HasMessage)); } }
     public bool MessageIsError { get => _messageIsError; set => SetField(ref _messageIsError, value); }
     public bool HasMessage => !string.IsNullOrWhiteSpace(Message);
@@ -146,6 +147,10 @@ public sealed class SettingsViewModel : ObservableObject
             Monitors.Clear();
             foreach (var monitor in Config.Monitors) Monitors.Add(new MonitorViewModel(monitor));
         }
+
+        var galleryMonitorId = Gallery.SelectedMonitor?.Model.MonitorId;
+        Gallery.SelectedMonitor = Monitors.FirstOrDefault(m => m.Model.MonitorId == galleryMonitorId)
+            ?? Monitors.FirstOrDefault();
 
         if (statuses is not null) ApplyStatuses(statuses);
         OnPropertyChanged(nameof(Config)); OnPropertyChanged(nameof(PauseText)); OnPropertyChanged(nameof(PauseGlyph));

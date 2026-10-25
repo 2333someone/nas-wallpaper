@@ -241,6 +241,74 @@ public sealed class CoreTests : IDisposable
         Assert.True(File.Exists(fallback.Path));
     }
 
+    [Fact]
+    public async Task UploadingImageRenamesInsteadOfOverwriting()
+    {
+        var source = Path.Combine(_root, "pictures");
+        Directory.CreateDirectory(source);
+        var existing = Path.Combine(source, "photo.jpg");
+        File.WriteAllText(existing, "keep");
+        var local = Path.Combine(_root, "photo.jpg");
+        File.WriteAllText(local, "new");
+
+        var input = (IImageUploader)ImageSourceFactory.Create(
+            new SourceConfig { Kind = SourceKind.Local, Address = source });
+        var uploaded = await input.UploadAsync(local, default);
+
+        Assert.Equal("photo (1).jpg", Path.GetFileName(uploaded));
+        Assert.Equal("keep", File.ReadAllText(existing));
+        Assert.Equal("new", File.ReadAllText(uploaded));
+    }
+
+    [Fact]
+    public async Task ImportedImageIsCopiedToSourceAndApplied()
+    {
+        var source = Path.Combine(_root, "pictures");
+        Directory.CreateDirectory(source);
+        var local = Path.Combine(_root, "dropped.jpg");
+        CreateImage(local, 1920, 1080);
+
+        var store = new ConfigStore(Path.Combine(_root, "data"));
+        var wallpaper = new FakeWallpaper();
+        var config = new AppConfig();
+        config.Monitors.Add(new MonitorConfig
+        {
+            MonitorId = "display-1",
+            Source = new() { Kind = SourceKind.Local, Address = source }
+        });
+
+        await using var engine = new RotationEngine(store, config, wallpaper);
+        var result = await engine.ImportImageAsync("display-1", local);
+
+        Assert.True(result.Success, result.Message);
+        var copied = Path.Combine(source, "dropped.jpg");
+        Assert.True(File.Exists(copied));
+        var applied = Assert.Single(wallpaper.Applied);
+        Assert.Equal(copied, applied.Path);
+    }
+
+    [Fact]
+    public async Task GalleryListsPortraitImagesEvenWhenRotationHidesThem()
+    {
+        var source = Path.Combine(_root, "pictures");
+        CreateImage(Path.Combine(source, "landscape.jpg"), 1920, 1080);
+        CreateImage(Path.Combine(source, "portrait.jpg"), 1080, 1920);
+
+        var store = new ConfigStore(Path.Combine(_root, "data"));
+        var config = new AppConfig();
+        config.Monitors.Add(new MonitorConfig
+        {
+            MonitorId = "display-1",
+            IncludePortrait = false,
+            Source = new() { Kind = SourceKind.Local, Address = source }
+        });
+
+        await using var engine = new RotationEngine(store, config, new FakeWallpaper());
+        var files = await engine.GetImagesAsync("display-1", refresh: true, default);
+
+        Assert.Equal(2, files.Count);
+    }
+
     private string Write(string name, int length)
     {
         var path = Path.Combine(_root, name);

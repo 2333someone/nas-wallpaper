@@ -11,7 +11,7 @@ using NasWallpaper.Services.Configuration;
 
 namespace NasWallpaper.Services.Sources;
 
-internal sealed class WebDavImageSource : IImageSource, IDisposable
+internal sealed class WebDavImageSource : IImageSource, IImageUploader, IDisposable
 {
     internal const int ScanLimit = 10_000;
     private static readonly XNamespace Dav = "DAV:";
@@ -119,6 +119,56 @@ internal sealed class WebDavImageSource : IImageSource, IDisposable
                 $"WebDAV 删除失败：{(int)response.StatusCode} {response.ReasonPhrase}",
                 null, response.StatusCode);
     }
+
+    /// <summary>PUT 到图片源根目录；同名文件不覆盖，自动换下一个序号。</summary>
+    public async Task<string> UploadAsync(string localPath, CancellationToken ct)
+    {
+        var name = Path.GetFileName(localPath);
+        var stem = Path.GetFileNameWithoutExtension(name);
+        var extension = Path.GetExtension(name);
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var candidate = attempt == 0 ? name : $"{stem} ({attempt}){extension}";
+            var target = new Uri(_root, Uri.EscapeDataString(candidate));
+            if (await ExistsAsync(target, ct).ConfigureAwait(false)) continue;
+
+            await using var stream = new FileStream(localPath, FileMode.Open, FileAccess.Read,
+                FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var content = new StreamContent(stream);
+            content.Headers.ContentType = new MediaTypeHeaderValue(MediaTypeFor(extension));
+            using var request = new HttpRequestMessage(HttpMethod.Put, target) { Content = content };
+            request.Headers.TryAddWithoutValidation("If-None-Match", "*");
+            using var response = await _client.SendAsync(request, ct).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode) return target.AbsoluteUri;
+            if (response.StatusCode is HttpStatusCode.PreconditionFailed or HttpStatusCode.Conflict)
+                continue;
+            throw new HttpRequestException(
+                $"WebDAV 上传失败：{(int)response.StatusCode} {response.ReasonPhrase}",
+                null, response.StatusCode);
+        }
+
+        throw new HttpRequestException("WebDAV 上传失败：同名文件过多，请先整理图片目录。");
+    }
+
+    private async Task<bool> ExistsAsync(Uri target, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(new HttpMethod("PROPFIND"), target);
+        request.Headers.TryAddWithoutValidation("Depth", "0");
+        using var response = await _client.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound) return false;
+        return response.IsSuccessStatusCode;
+    }
+
+    private static string MediaTypeFor(string extension) => extension.ToLowerInvariant() switch
+    {
+        ".png" => "image/png",
+        ".bmp" => "image/bmp",
+        ".gif" => "image/gif",
+        ".tif" or ".tiff" => "image/tiff",
+        _ => "image/jpeg"
+    };
 
     public void Dispose() => _client.Dispose();
 

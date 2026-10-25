@@ -99,6 +99,16 @@ public partial class App : System.Windows.Application
             _settings.InstallUpdateRequested += InstallUpdateAsync;
             _settings.DeleteImageRequested += (monitorId, path) =>
                 _engine?.DeleteImageAsync(monitorId, path) ?? Task.FromResult(false);
+            _settings.ImagesRequested += (monitorId, refresh) => _engine is null
+                ? Task.FromResult<IReadOnlyList<SourceFile>>([])
+                : _engine.GetImagesAsync(monitorId, refresh, CancellationToken.None);
+            _settings.ThumbnailLoaderRequested += monitorId => _engine?.CreateThumbnailLoader(monitorId);
+            _settings.ApplyImageRequested += (monitorId, file) => _engine is null
+                ? Task.FromResult(false)
+                : _engine.ApplyImageAsync(monitorId, file);
+            _settings.ImportImageRequested += (monitorId, path) => _engine is null
+                ? Task.FromResult(new ImportImageResult(false, "壁纸引擎尚未启动。"))
+                : _engine.ImportImageAsync(monitorId, path);
             _settings.ExitRequested += ExitApp;
         }
         if (_settings.IsVisible) { _settings.Activate(); return; }

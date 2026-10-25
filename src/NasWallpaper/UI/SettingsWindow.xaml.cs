@@ -1,5 +1,7 @@
 using NasWallpaper.Models;
 using NasWallpaper.Services.Configuration;
+using NasWallpaper.Services.Preview;
+using NasWallpaper.Services.Sources;
 using NasWallpaper.Services.Update;
 using System.IO;
 using System.Windows;
@@ -9,6 +11,10 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Brush = System.Windows.Media.Brush;
+using DataFormats = System.Windows.DataFormats;
+using DragDropEffects = System.Windows.DragDropEffects;
+using DragEventArgs = System.Windows.DragEventArgs;
+using IDataObject = System.Windows.IDataObject;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using RadioButton = System.Windows.Controls.RadioButton;
 using TextBox = System.Windows.Controls.TextBox;
@@ -17,10 +23,17 @@ namespace NasWallpaper.UI;
 
 public partial class SettingsWindow : Window
 {
-    private static readonly string[] PageTitles = ["概览", "显示器与图片源", "缓存与系统", "关于"];
+    private const int GalleryIndex = 1;
+    private const int GalleryPageSize = 60;
+    private const int GalleryMaxItems = 480;
+    private const int ThumbnailWidth = 240;
+    private const int ViewerImageWidth = 2560;
+
+    private static readonly string[] PageTitles = ["概览", "壁纸库", "显示器与图片源", "缓存与系统", "关于"];
     private static readonly string[] PageSubtitles =
     [
         "所有显示器都在后台安静地工作。",
+        "浏览图片源里的每一张图，看中哪张就让它上桌面。",
         "为每台显示器指定图片目录，以及它自己的节奏。",
         "缓存策略、桌面外观与开机启动。",
         "轻量、本地、只连接你自己的图片源。"
@@ -31,6 +44,13 @@ public partial class SettingsWindow : Window
     private readonly RadioButton[] _navButtons;
     private readonly DispatcherTimer _statusTimer;
     private readonly DispatcherTimer _toastTimer;
+    private readonly List<SourceFile> _galleryFiles = [];
+    private readonly SemaphoreSlim _thumbnailGate = new(2, 2);
+    private CancellationTokenSource? _galleryCts;
+    private GalleryThumbnailLoader? _galleryLoader;
+    private ImageViewerWindow? _viewer;
+    private int _galleryShown;
+    private bool _galleryLoaded;
     private int _pageIndex = -1;
     private bool _closingToTray = true;
     private UIElement? _pendingDeleteButton;
@@ -43,14 +63,18 @@ public partial class SettingsWindow : Window
     public event Func<string, string?, Task<bool>>? DeleteImageRequested;
     public event Func<string, Task<UpdateInfo?>>? CheckUpdateRequested;
     public event Func<UpdateInfo, IProgress<double>, Task<bool>>? InstallUpdateRequested;
+    public event Func<string, bool, Task<IReadOnlyList<SourceFile>>>? ImagesRequested;
+    public event Func<string, GalleryThumbnailLoader?>? ThumbnailLoaderRequested;
+    public event Func<string, SourceFile, Task<bool>>? ApplyImageRequested;
+    public event Func<string, string, Task<ImportImageResult>>? ImportImageRequested;
     public event Action? ExitRequested;
 
     public SettingsWindow()
     {
         InitializeComponent();
         _viewModel = (SettingsViewModel)DataContext;
-        _pages = [OverviewPage, MonitorsPage, SystemPage, AboutPage];
-        _navButtons = [NavOverview, NavMonitors, NavSystem, NavAbout];
+        _pages = [OverviewPage, GalleryPage, MonitorsPage, SystemPage, AboutPage];
+        _navButtons = [NavOverview, NavGallery, NavMonitors, NavSystem, NavAbout];
 
         _statusTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(3) };
         _statusTimer.Tick += (_, _) => RefreshStatuses();
@@ -62,7 +86,20 @@ public partial class SettingsWindow : Window
         IsVisibleChanged += (_, e) =>
         {
             if (e.NewValue is true) { _statusTimer.Start(); RefreshStatuses(); }
-            else { _statusTimer.Stop(); _toastTimer.Stop(); HideToast(immediate: true); }
+            else
+            {
+                _statusTimer.Stop();
+                _toastTimer.Stop();
+                HideToast(immediate: true);
+                _viewer?.Close();
+            }
+        };
+        Closed += (_, _) =>
+        {
+            _galleryCts?.Cancel();
+            _galleryCts?.Dispose();
+            _galleryLoader?.Dispose();
+            _viewer?.Close();
         };
 
         FitToWorkArea();
@@ -110,6 +147,8 @@ public partial class SettingsWindow : Window
     {
         // 不再重置 DataContext：那会让所有开关控件重新创建，保存时出现一次“闪一下”的动画。
         _viewModel.Load(config, statuses, defaultCachePath);
+        // 保存后图片源可能变了，壁纸库需要重新读取。
+        _galleryLoaded = false;
         ShowPage(Math.Max(_pageIndex, 0), animate: false);
     }
 
@@ -117,6 +156,227 @@ public partial class SettingsWindow : Window
     {
         var statuses = StatusRequested?.Invoke();
         if (statuses is not null) _viewModel.ApplyStatuses(statuses);
+    }
+
+    /// <summary>读取当前显示器图片源里的图片清单，并把第一页铺到壁纸库。</summary>
+    private async Task LoadGalleryAsync(bool refresh)
+    {
+        var gallery = _viewModel.Gallery;
+        var monitor = gallery.SelectedMonitor ?? _viewModel.Monitors.FirstOrDefault();
+        if (monitor is null)
+        {
+            gallery.Reset("还没有检测到显示器。");
+            _galleryLoaded = false;
+            return;
+        }
+        if (!ReferenceEquals(gallery.SelectedMonitor, monitor)) gallery.SelectedMonitor = monitor;
+
+        if (string.IsNullOrWhiteSpace(monitor.Model.Source.Address))
+        {
+            gallery.Reset("这台显示器还没有配置图片源，请先到「显示器与图片源」页面填写。");
+            _galleryLoaded = false;
+            return;
+        }
+
+        _galleryCts?.Cancel();
+        _galleryCts?.Dispose();
+        _galleryCts = new CancellationTokenSource();
+        var ct = _galleryCts.Token;
+
+        _galleryLoader?.Dispose();
+        try
+        {
+            _galleryLoader = ThumbnailLoaderRequested?.Invoke(monitor.Model.MonitorId);
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException or NotSupportedException)
+        {
+            _galleryLoader = null;
+        }
+
+        _galleryFiles.Clear();
+        _galleryShown = 0;
+        gallery.Reset("正在读取图片列表…");
+        gallery.IsLoading = true;
+
+        try
+        {
+            var files = ImagesRequested is null
+                ? Array.Empty<SourceFile>()
+                : await ImagesRequested(monitor.Model.MonitorId, refresh);
+            if (ct.IsCancellationRequested) return;
+
+            _galleryFiles.AddRange(files);
+            _galleryLoaded = true;
+            if (files.Count == 0)
+            {
+                gallery.Summary = "这个图片源里还没有图片。";
+                return;
+            }
+            ShowMoreGallery();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            System.Net.Http.HttpRequestException or NotSupportedException or
+            ArgumentException or FormatException or InvalidOperationException)
+        {
+            _galleryLoaded = false;
+            gallery.Summary = "读取失败：" + DescribeError(ex);
+        }
+        finally
+        {
+            gallery.IsLoading = false;
+        }
+    }
+
+    private void ShowMoreGallery()
+    {
+        var gallery = _viewModel.Gallery;
+        if (_galleryShown >= _galleryFiles.Count || _galleryShown >= GalleryMaxItems)
+        {
+            gallery.CanLoadMore = false;
+            return;
+        }
+
+        var remaining = Math.Min(GalleryPageSize, GalleryMaxItems - _galleryShown);
+        var batch = _galleryFiles.Skip(_galleryShown).Take(remaining).ToList();
+        foreach (var file in batch)
+        {
+            var item = new GalleryImage(file);
+            gallery.Images.Add(item);
+            _ = LoadThumbnailAsync(item);
+        }
+        _galleryShown += batch.Count;
+
+        gallery.CanLoadMore = _galleryShown < _galleryFiles.Count && _galleryShown < GalleryMaxItems;
+        gallery.Summary = _galleryShown >= _galleryFiles.Count
+            ? $"共 {_galleryFiles.Count:N0} 张"
+            : _galleryShown >= GalleryMaxItems
+                ? $"共 {_galleryFiles.Count:N0} 张 · 已显示前 {_galleryShown:N0} 张（浏览上限）"
+                : $"共 {_galleryFiles.Count:N0} 张 · 已显示 {_galleryShown:N0} 张";
+        gallery.NotifyCountChanged();
+    }
+
+    private async Task LoadThumbnailAsync(GalleryImage item)
+    {
+        var loader = _galleryLoader;
+        var token = _galleryCts?.Token ?? CancellationToken.None;
+        if (loader is null || token.IsCancellationRequested) return;
+
+        try
+        {
+            await _thumbnailGate.WaitAsync(token);
+        }
+        catch (OperationCanceledException) { return; }
+
+        try
+        {
+            var thumbnail = await loader.LoadAsync(item.File, ThumbnailWidth, token);
+            if (token.IsCancellationRequested) return;
+            item.Thumbnail = thumbnail;
+            item.Failed = thumbnail is null;
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            _thumbnailGate.Release();
+        }
+    }
+
+    private async void GalleryMonitor_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsInitialized || _viewModel.Gallery.SelectedMonitor is null) return;
+        if (_pageIndex != GalleryIndex) { _galleryLoaded = false; return; }
+        _galleryLoaded = false;
+        await LoadGalleryAsync(refresh: false);
+    }
+
+    private async void GalleryRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        ShowToast("正在重新读取图片列表…", false);
+        await LoadGalleryAsync(refresh: true);
+        RefreshStatuses();
+    }
+
+    private void GalleryMore_Click(object sender, RoutedEventArgs e) => ShowMoreGallery();
+
+    private void GalleryImage_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: GalleryImage item }) return;
+
+        var index = _galleryFiles.FindIndex(f =>
+            string.Equals(f.Location, item.File.Location, StringComparison.OrdinalIgnoreCase));
+        if (index < 0) index = _viewModel.Gallery.Images.IndexOf(item);
+        OpenViewer(Math.Max(index, 0));
+    }
+
+    /// <summary>打开大图查看窗口；单独申请一个加载器，避免壁纸库刷新时把查看中的图源关掉。</summary>
+    private void OpenViewer(int index)
+    {
+        var monitor = _viewModel.Gallery.SelectedMonitor;
+        if (monitor is null || _galleryFiles.Count == 0) return;
+
+        GalleryThumbnailLoader? loader;
+        try
+        {
+            loader = ThumbnailLoaderRequested?.Invoke(monitor.Model.MonitorId);
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException or NotSupportedException)
+        {
+            loader = null;
+        }
+
+        if (loader is null)
+        {
+            ShowToast("无法打开图片查看器，请检查图片源配置。", true);
+            return;
+        }
+
+        _viewer?.Close();
+
+        var files = _galleryFiles.ToList();
+        var viewer = new ImageViewerWindow(
+            monitor.Name,
+            files,
+            index,
+            (file, ct) => loader.LoadAsync(file, ViewerImageWidth, ct),
+            async file =>
+            {
+                var applied = ApplyImageRequested is null ||
+                    await ApplyImageRequested(monitor.Model.MonitorId, file);
+                RefreshStatuses();
+                return applied;
+            },
+            async file =>
+            {
+                var deleted = DeleteImageRequested is null ||
+                    await DeleteImageRequested(monitor.Model.MonitorId, file.Location);
+                if (!deleted) return false;
+
+                _galleryFiles.RemoveAll(f =>
+                    string.Equals(f.Location, file.Location, StringComparison.OrdinalIgnoreCase));
+                RefreshStatuses();
+                await LoadGalleryAsync(refresh: false);
+                return true;
+            })
+        {
+            Owner = this
+        };
+
+        viewer.Closed += (_, _) =>
+        {
+            loader.Dispose();
+            if (ReferenceEquals(_viewer, viewer)) _viewer = null;
+        };
+
+        _viewer = viewer;
+        viewer.Show();
+    }
+
+    private static string DescribeError(Exception ex)
+    {
+        var message = ex.GetBaseException().Message.Trim();
+        if (string.IsNullOrWhiteSpace(message)) return "未知错误";
+        return message.Length <= 80 ? message : message[..80] + "…";
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -146,6 +406,7 @@ public partial class SettingsWindow : Window
     private void ShowPage(int index, bool animate = true)
     {
         if (index < 0 || index >= _pages.Length) return;
+        if (index == GalleryIndex && !_galleryLoaded) _ = LoadGalleryAsync(refresh: false);
         if (index == _pageIndex && _pages[index].Visibility == Visibility.Visible) return;
         _pageIndex = index;
 
@@ -431,6 +692,74 @@ public partial class SettingsWindow : Window
     {
         RefreshStatuses();
         ShowToast("状态已刷新", error: false);
+    }
+
+    /// <summary>只接受壁纸库页面上的图片拖入：图片会进入当前显示器的图片源并立即上桌面。</summary>
+    private bool CanAcceptDrop(IDataObject data)
+    {
+        if (_pageIndex != GalleryIndex) return false;
+        if (_viewModel.Gallery.SelectedMonitor is null) return false;
+        return TryGetDroppedImages(data, out _);
+    }
+
+    private static bool TryGetDroppedImages(IDataObject data, out string[] files)
+    {
+        files = [];
+        if (!data.GetDataPresent(DataFormats.FileDrop)) return false;
+        if (data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0) return false;
+        files = paths.Where(p => IImageSource.IsImagePath(p)).ToArray();
+        return files.Length > 0;
+    }
+
+    private void Window_PreviewDragOver(object sender, DragEventArgs e)
+    {
+        // 文本拖拽（例如把路径拖进输入框）交给控件自己处理。
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+        e.Effects = CanAcceptDrop(e.Data) ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private async void Window_Drop(object sender, DragEventArgs e)
+    {
+        if (!CanAcceptDrop(e.Data) || !TryGetDroppedImages(e.Data, out var files)) return;
+        var monitor = _viewModel.Gallery.SelectedMonitor!;
+        e.Handled = true;
+
+        var paths = files.Take(20).ToArray();
+        ShowToast(paths.Length == 1 ? "正在导入图片…" : $"正在导入 {paths.Length} 张图片…", error: false);
+
+        var imported = 0;
+        var lastError = "";
+        foreach (var path in paths)
+        {
+            ImportImageResult result;
+            try
+            {
+                result = ImportImageRequested is null
+                    ? new ImportImageResult(false, "导入功能尚未就绪。")
+                    : await ImportImageRequested(monitor.Model.MonitorId, path);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+                System.Net.Http.HttpRequestException or NotSupportedException or ArgumentException)
+            {
+                result = new ImportImageResult(false, ex.Message);
+            }
+
+            if (result.Success) imported++;
+            else lastError = result.Message;
+        }
+
+        RefreshStatuses();
+        if (imported == 0)
+        {
+            ShowToast(string.IsNullOrWhiteSpace(lastError) ? "导入失败。" : lastError, error: true);
+            return;
+        }
+
+        ShowToast(imported == 1
+            ? "已上传到 NAS 并设为壁纸"
+            : $"已上传 {imported} 张，最后一张已成为壁纸", error: false);
+        await LoadGalleryAsync(refresh: true);
     }
 
     private void Password_Changed(object sender, RoutedEventArgs e)

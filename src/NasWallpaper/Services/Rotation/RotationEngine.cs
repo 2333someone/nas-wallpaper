@@ -1,6 +1,7 @@
 using NasWallpaper.Models;
 using NasWallpaper.Services.Cache;
 using NasWallpaper.Services.Configuration;
+using NasWallpaper.Services.Preview;
 using NasWallpaper.Services.Sources;
 using NasWallpaper.Services.Wallpaper;
 using System.Collections.Concurrent;
@@ -390,6 +391,164 @@ public sealed class RotationEngine : IAsyncDisposable
 
     private static bool IsDirectSource(SourceKind kind) =>
         kind is SourceKind.Smb or SourceKind.Local;
+
+    /// <summary>
+    /// 壁纸库用：返回某台显示器图片源里的全部图片（包含竖向图，浏览时不过滤方向）。
+    /// refresh 为 false 时优先复用轮播扫描的结果。
+    /// </summary>
+    public async Task<IReadOnlyList<SourceFile>> GetImagesAsync(
+        string monitorId, bool refresh, CancellationToken ct)
+    {
+        MonitorConfig profile;
+        MonitorRuntime state;
+        lock (_sync)
+        {
+            var monitor = _config.Monitors.FirstOrDefault(m => m.MonitorId == monitorId);
+            if (monitor is null) return [];
+            profile = monitor.CloneMonitor();
+            state = _states[monitorId];
+        }
+
+        if (string.IsNullOrWhiteSpace(profile.Source.Address)) return [];
+        if (!refresh && state.Files is { Count: > 0 } cached &&
+            DateTimeOffset.UtcNow - state.LastScan < TimeSpan.FromMinutes(_config.ScanIntervalMinutes))
+            return cached.ToList();
+
+        await _scanGate.WaitAsync(ct);
+        try
+        {
+            using var source = new SourceLease(profile.Source);
+            var files = new List<SourceFile>();
+            await _network.WaitAsync(ct);
+            try
+            {
+                await foreach (var file in source.Value.ScanAsync(ct)) files.Add(file);
+            }
+            finally { _network.Release(); }
+
+            lock (_sync)
+            {
+                var previous = state.LastSourcePath;
+                state.Files = files;
+                state.LastScan = DateTimeOffset.UtcNow;
+                var index = string.IsNullOrEmpty(previous) ? -1 : files.FindIndex(
+                    f => string.Equals(f.Location, previous, StringComparison.OrdinalIgnoreCase));
+                if (index >= 0) state.SequentialIndex = (index + 1) % Math.Max(files.Count, 1);
+            }
+            return files;
+        }
+        finally { _scanGate.Release(); }
+    }
+
+    /// <summary>壁纸库用：新建一个缩略图加载器，界面离开壁纸库时负责释放。</summary>
+    public GalleryThumbnailLoader? CreateThumbnailLoader(string monitorId)
+    {
+        MonitorConfig profile;
+        ImageCache cache;
+        lock (_sync)
+        {
+            var monitor = _config.Monitors.FirstOrDefault(m => m.MonitorId == monitorId);
+            if (monitor is null || string.IsNullOrWhiteSpace(monitor.Source.Address)) return null;
+            profile = monitor.CloneMonitor();
+            cache = _cache;
+        }
+        return new GalleryThumbnailLoader(profile.Source, cache);
+    }
+
+    /// <summary>把指定的一张图立即应用到桌面（壁纸库点“设为壁纸”）。</summary>
+    public async Task<bool> ApplyImageAsync(string monitorId, SourceFile file)
+    {
+        MonitorConfig profile;
+        lock (_sync)
+        {
+            var monitor = _config.Monitors.FirstOrDefault(m => m.MonitorId == monitorId);
+            if (monitor is null) return false;
+            profile = monitor.CloneMonitor();
+        }
+
+        var gate = _monitorLocks.GetOrAdd(monitorId, _ => new(1, 1));
+        if (!await gate.WaitAsync(0)) return false;
+        try
+        {
+            using var source = new SourceLease(profile.Source);
+            var state = _states[monitorId];
+            await ApplyChosenAsync(profile, state, source.Value, file,
+                trackHistory: false, CancellationToken.None);
+            Changed?.Invoke();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            HttpRequestException or NotSupportedException or ArgumentException or
+            System.Runtime.InteropServices.COMException)
+        {
+            if (_states.TryGetValue(monitorId, out var state))
+                state.Message = "无法切换：" + DescribeFailure(ex);
+            Changed?.Invoke();
+            return false;
+        }
+        finally { gate.Release(); }
+    }
+
+    /// <summary>
+    /// 拖拽导入：把本地图片放进显示器的图片源目录（NAS 上的图片文件夹），
+    /// 然后立刻把这张图设为该显示器的壁纸。同名文件自动加序号，不覆盖源图。
+    /// </summary>
+    public async Task<ImportImageResult> ImportImageAsync(
+        string monitorId, string localPath, CancellationToken ct = default)
+    {
+        if (!File.Exists(localPath)) return new(false, "找不到这个文件。");
+        if (!IImageSource.IsImagePath(localPath))
+            return new(false, $"只支持图片文件：{Path.GetFileName(localPath)}");
+
+        var info = new FileInfo(localPath);
+        if (info.Length == 0) return new(false, "图片是空文件。");
+        if (info.Length > ImageCache.MaximumImageBytes)
+            return new(false, "图片超过 100 MB，暂不支持导入。");
+
+        MonitorConfig profile;
+        lock (_sync)
+        {
+            var monitor = _config.Monitors.FirstOrDefault(m => m.MonitorId == monitorId);
+            if (monitor is null) return new(false, "找不到对应的显示器配置。");
+            profile = monitor.CloneMonitor();
+        }
+        if (string.IsNullOrWhiteSpace(profile.Source.Address))
+            return new(false, "请先为这台显示器配置图片源。");
+
+        string location;
+        try
+        {
+            using var source = new SourceLease(profile.Source);
+            if (source.Value is not IImageUploader uploader)
+                return new(false, "当前图片源不支持写入。");
+            location = await uploader.UploadAsync(localPath, ct);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            HttpRequestException or NotSupportedException or ArgumentException)
+        {
+            return new(false, "上传失败：" + DescribeFailure(ex));
+        }
+
+        IReadOnlyList<SourceFile> files;
+        try
+        {
+            files = await GetImagesAsync(monitorId, refresh: true, ct);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            HttpRequestException or NotSupportedException or ArgumentException or OperationCanceledException)
+        {
+            return new(false, "已上传，但重新扫描图片源失败：" + DescribeFailure(ex));
+        }
+
+        var uploaded = files.FirstOrDefault(f =>
+            string.Equals(f.Location, location, StringComparison.OrdinalIgnoreCase));
+        if (uploaded is null)
+            return new(false, "已上传，但在图片源中没有找到它（可能超出了扫描数量上限）。");
+
+        return await ApplyImageAsync(monitorId, uploaded)
+            ? new(true, $"已上传并设为壁纸：{Path.GetFileName(localPath)}")
+            : new(false, "已上传，但设置为壁纸失败。");
+    }
 
     /// <summary>直接使用 NAS 原图时，顺手在后台缓存一份，断网时才有东西可退。</summary>
     private void QueueFallbackCopy(MonitorConfig profile, SourceFile file)
