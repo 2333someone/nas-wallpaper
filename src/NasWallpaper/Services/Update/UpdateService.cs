@@ -200,13 +200,13 @@ public static class UpdateService
     }
 
     /// <summary>
-    /// 依次尝试下载通道：先走 releases/download（浏览器同款直链），不行再走 GitHub API 的资产地址。
-    /// 后者在 github.com 被墙但 api.github.com 可用的网络里仍能下到。
+    /// 依次尝试下载通道：优先 GitHub API 的资产地址（api.github.com 通常比 github.com 稳，
+    /// 而且会重定向到 objects CDN，实测快数倍），失败再退回 releases/download 直链。
     /// </summary>
     public static async Task DownloadAsync(
         UpdateInfo info, string destination, IProgress<double>? progress, CancellationToken ct)
     {
-        var urls = new[] { info.DownloadUrl, info.ApiDownloadUrl }
+        var urls = new[] { info.ApiDownloadUrl, info.DownloadUrl }
             .Where(u => !string.IsNullOrWhiteSpace(u))
             .Select(u => u!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
