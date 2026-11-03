@@ -60,8 +60,17 @@ public sealed class GalleryImage(SourceFile file) : ObservableObject
     private int _sourceWidth;
     private int _sourceHeight;
 
-    public SourceFile File { get; } = file;
+    public SourceFile File { get; private set; } = file;
     public string Name => Path.GetFileName(File.Location);
+
+    /// <summary>图片被旋转写回后更新元数据，让缩略图按新的文件版本重新加载。</summary>
+    public void UpdateFile(SourceFile file)
+    {
+        File = file;
+        OnPropertyChanged(nameof(File));
+        OnPropertyChanged(nameof(Name));
+        OnPropertyChanged(nameof(DetailText));
+    }
 
     public BitmapSource? Thumbnail
     {

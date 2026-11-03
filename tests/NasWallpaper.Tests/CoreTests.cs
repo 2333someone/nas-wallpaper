@@ -1,6 +1,7 @@
 using NasWallpaper.Models;
 using NasWallpaper.Services.Cache;
 using NasWallpaper.Services.Configuration;
+using NasWallpaper.Services.Editing;
 using NasWallpaper.Services.Preview;
 using NasWallpaper.Services.Rotation;
 using NasWallpaper.Services.Sources;
@@ -336,6 +337,55 @@ public sealed class CoreTests : IDisposable
         var cached = await loader.LoadAsync(file, 240, default);
         Assert.NotNull(cached);
         Assert.Equal(1920, cached!.Width);
+    }
+
+    [Fact]
+    public void RotatingImageSwapsDimensions()
+    {
+        var path = Path.Combine(_root, "rotate.jpg");
+        CreateImage(path, 320, 200);
+
+        var clockwise = ImageRotator.Rotate(File.ReadAllBytes(path), ".jpg", RotateDirection.Clockwise);
+        var frame = BitmapDecoder.Create(new MemoryStream(clockwise),
+            BitmapCreateOptions.None, BitmapCacheOption.OnLoad).Frames[0];
+        Assert.Equal(200, frame.PixelWidth);
+        Assert.Equal(320, frame.PixelHeight);
+
+        var back = ImageRotator.Rotate(clockwise, ".jpg", RotateDirection.CounterClockwise);
+        var backFrame = BitmapDecoder.Create(new MemoryStream(back),
+            BitmapCreateOptions.None, BitmapCacheOption.OnLoad).Frames[0];
+        Assert.Equal(320, backFrame.PixelWidth);
+        Assert.Equal(200, backFrame.PixelHeight);
+    }
+
+    [Fact]
+    public async Task RotatingImageWritesBackToSource()
+    {
+        var source = Path.Combine(_root, "pictures");
+        var path = Path.Combine(source, "wallpaper.jpg");
+        CreateImage(path, 320, 200);
+        var info = new FileInfo(path);
+        var file = new SourceFile(info.FullName, info.Length, info.LastWriteTimeUtc);
+
+        var store = new ConfigStore(Path.Combine(_root, "data"));
+        var config = new AppConfig();
+        config.Monitors.Add(new MonitorConfig
+        {
+            MonitorId = "display-1",
+            Source = new() { Kind = SourceKind.Local, Address = source }
+        });
+        await using var engine = new RotationEngine(store, config, new FakeWallpaper());
+
+        var result = await engine.RotateImageAsync(
+            "display-1", file, RotateDirection.Clockwise, default);
+
+        Assert.True(result.Success, result.Message);
+        Assert.True(result.Length > 0);
+        var frame = BitmapDecoder.Create(
+            new MemoryStream(File.ReadAllBytes(path)),
+            BitmapCreateOptions.None, BitmapCacheOption.OnLoad).Frames[0];
+        Assert.Equal(200, frame.PixelWidth);
+        Assert.Equal(320, frame.PixelHeight);
     }
 
     [Fact]

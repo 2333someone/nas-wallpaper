@@ -16,11 +16,13 @@ public partial class ImageViewerWindow : Window
     private readonly Func<SourceFile, CancellationToken, Task<PreviewImage?>> _load;
     private readonly Func<SourceFile, Task<bool>> _apply;
     private readonly Func<SourceFile, Task<bool>> _delete;
+    private readonly Func<SourceFile, RotateDirection, Task<RotateImageResult>> _rotate;
     private readonly string _monitorName;
     private CancellationTokenSource? _cts;
     private int _index;
     private bool _applying;
     private bool _deleting;
+    private bool _rotating;
     private bool _deletePending;
     private int _deleteConfirmToken;
 
@@ -30,7 +32,8 @@ public partial class ImageViewerWindow : Window
         int index,
         Func<SourceFile, CancellationToken, Task<PreviewImage?>> load,
         Func<SourceFile, Task<bool>> apply,
-        Func<SourceFile, Task<bool>> delete)
+        Func<SourceFile, Task<bool>> delete,
+        Func<SourceFile, RotateDirection, Task<RotateImageResult>> rotate)
     {
         InitializeComponent();
         _monitorName = monitorName;
@@ -39,6 +42,7 @@ public partial class ImageViewerWindow : Window
         _load = load;
         _apply = apply;
         _delete = delete;
+        _rotate = rotate;
 
         var work = SystemParameters.WorkArea;
         Width = Math.Min(Width, Math.Max(MinWidth, work.Width - 40));
@@ -132,6 +136,54 @@ public partial class ImageViewerWindow : Window
         {
             _applying = false;
             ApplyButton.IsEnabled = true;
+        }
+    }
+
+    private void RotateLeft_Click(object sender, RoutedEventArgs e) =>
+        _ = RotateCurrentAsync(RotateDirection.CounterClockwise);
+
+    private void RotateRight_Click(object sender, RoutedEventArgs e) =>
+        _ = RotateCurrentAsync(RotateDirection.Clockwise);
+
+    /// <summary>把当前这张图旋转 90° 并写回图片源，随后重新载入预览。</summary>
+    private async Task RotateCurrentAsync(RotateDirection direction)
+    {
+        if (_rotating || _files.Count == 0) return;
+        _rotating = true;
+        RotateLeftButton.IsEnabled = false;
+        RotateRightButton.IsEnabled = false;
+        StatusText.Text = direction == RotateDirection.Clockwise
+            ? "正在顺时针旋转并写回图片源…"
+            : "正在逆时针旋转并写回图片源…";
+
+        try
+        {
+            var result = await _rotate(_files[_index], direction);
+            if (!result.Success)
+            {
+                StatusText.Text = result.Message;
+                return;
+            }
+
+            _files[_index] = _files[_index] with
+            {
+                Length = result.Length,
+                LastWriteUtc = result.LastWriteUtc
+            };
+            await ShowCurrentAsync();
+            StatusText.Text = "已写回图片源，点“设为壁纸”立即生效";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            System.Net.Http.HttpRequestException or NotSupportedException or ArgumentException or
+            InvalidOperationException)
+        {
+            StatusText.Text = "旋转失败：" + ex.Message;
+        }
+        finally
+        {
+            _rotating = false;
+            RotateLeftButton.IsEnabled = true;
+            RotateRightButton.IsEnabled = true;
         }
     }
 

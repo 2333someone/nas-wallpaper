@@ -1,6 +1,7 @@
 using NasWallpaper.Models;
 using NasWallpaper.Services.Cache;
 using NasWallpaper.Services.Configuration;
+using NasWallpaper.Services.Editing;
 using NasWallpaper.Services.Preview;
 using NasWallpaper.Services.Sources;
 using NasWallpaper.Services.Wallpaper;
@@ -183,6 +184,78 @@ public sealed class RotationEngine : IAsyncDisposable
         SaveState();
         Changed?.Invoke();
         return true;
+    }
+
+    /// <summary>
+    /// 把图片源上的这张原图旋转 90° 并原地写回（SMB / 本地 / WebDAV 都支持）。
+    /// 只改图片源里的原文件，不会动本地缓存副本。
+    /// </summary>
+    public async Task<RotateImageResult> RotateImageAsync(
+        string monitorId, SourceFile file, RotateDirection direction, CancellationToken ct)
+    {
+        MonitorConfig? monitor;
+        lock (_sync) monitor = _config.Monitors.FirstOrDefault(m => m.MonitorId == monitorId);
+        if (monitor is null) return new(false, "找不到对应的显示器配置。");
+        if (!IImageSource.IsImagePath(file.Location)) return new(false, "这个文件不是支持的图片格式。");
+        if (!IsInSource(monitor.Source, file.Location)) return new(false, "这张图片不在配置的图片源目录内。");
+
+        var extension = Path.GetExtension(file.Location).ToLowerInvariant();
+        if (extension == ".gif") return new(false, "GIF 动图暂不支持旋转。");
+
+        try
+        {
+            using var lease = new SourceLease(monitor.Source);
+            if (lease.Value is not IImageReplacer replacer)
+                return new(false, "当前图片源不支持写回，无法旋转。");
+
+            byte[] original;
+            await using (var input = await lease.Value.OpenReadAsync(file, ct).ConfigureAwait(false))
+            {
+                using var buffer = new MemoryStream();
+                await input.CopyToAsync(buffer, ct).ConfigureAwait(false);
+                if (buffer.Length > ImageCache.MaximumImageBytes)
+                    return new(false, "图片超过 100 MB，暂不支持旋转。");
+                original = buffer.ToArray();
+            }
+
+            var rotated = await Task.Run(
+                () => ImageRotator.Rotate(original, extension, direction), ct).ConfigureAwait(false);
+
+            await using (var content = new MemoryStream(rotated, writable: false))
+            {
+                await replacer.ReplaceAsync(file.Location, content, ct).ConfigureAwait(false);
+            }
+
+            var lastWrite = DateTimeOffset.UtcNow;
+            lock (_sync)
+            {
+                if (_states.TryGetValue(monitorId, out var state))
+                {
+                    if (state.Files is { } files)
+                    {
+                        var index = files.FindIndex(f =>
+                            string.Equals(f.Location, file.Location, StringComparison.OrdinalIgnoreCase));
+                        if (index >= 0)
+                            files[index] = files[index] with
+                            {
+                                Length = rotated.Length,
+                                LastWriteUtc = lastWrite
+                            };
+                    }
+                    // 原图内容变了，旧缓存作废，下次会被重新生成。
+                    if (string.Equals(state.LastSourcePath, file.Location, StringComparison.OrdinalIgnoreCase))
+                        monitor.LastGoodPath = null;
+                }
+            }
+
+            return new(true, "已旋转并写回图片源", rotated.Length, lastWrite);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException
+            or NotSupportedException or ArgumentException or InvalidOperationException
+            or System.Runtime.InteropServices.COMException)
+        {
+            return new(false, "旋转失败：" + DescribeFailure(ex));
+        }
     }
 
     /// <summary>确认要删的文件确实位于该显示器的图片源目录内。</summary>

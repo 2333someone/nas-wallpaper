@@ -11,7 +11,7 @@ using NasWallpaper.Services.Configuration;
 
 namespace NasWallpaper.Services.Sources;
 
-internal sealed class WebDavImageSource : IImageSource, IImageUploader, IDisposable
+internal sealed class WebDavImageSource : IImageSource, IImageUploader, IImageReplacer, IDisposable
 {
     internal const int ScanLimit = 10_000;
     private static readonly XNamespace Dav = "DAV:";
@@ -118,6 +118,53 @@ internal sealed class WebDavImageSource : IImageSource, IImageUploader, IDisposa
             throw new HttpRequestException(
                 $"WebDAV 删除失败：{(int)response.StatusCode} {response.ReasonPhrase}",
                 null, response.StatusCode);
+    }
+
+    /// <summary>
+    /// 覆盖 WebDAV 上的原图：先 PUT 到同目录的临时文件，再用 MOVE 覆盖原名，
+    /// 避免上传中断把原图弄坏。
+    /// </summary>
+    public async Task ReplaceAsync(string location, Stream content, CancellationToken ct)
+    {
+        var target = new Uri(location, UriKind.Absolute);
+        EnsureInRoot(target, _root);
+
+        var tempName = Path.GetFileName(target.LocalPath) + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var tempUri = new Uri(target, Uri.EscapeDataString(tempName));
+
+        try
+        {
+            using (var payload = new StreamContent(content))
+            {
+                payload.Headers.ContentType = new MediaTypeHeaderValue(
+                    MediaTypeFor(Path.GetExtension(target.LocalPath)));
+                using var put = new HttpRequestMessage(HttpMethod.Put, tempUri) { Content = payload };
+                using var uploaded = await _client.SendAsync(put, ct).ConfigureAwait(false);
+                if (!uploaded.IsSuccessStatusCode)
+                    throw new HttpRequestException(
+                        $"WebDAV 写入失败：{(int)uploaded.StatusCode} {uploaded.ReasonPhrase}",
+                        null, uploaded.StatusCode);
+            }
+
+            using var move = new HttpRequestMessage(new HttpMethod("MOVE"), tempUri);
+            move.Headers.TryAddWithoutValidation("Destination", target.AbsoluteUri);
+            move.Headers.TryAddWithoutValidation("Overwrite", "T");
+            using var moved = await _client.SendAsync(move, ct).ConfigureAwait(false);
+            if (!moved.IsSuccessStatusCode)
+                throw new HttpRequestException(
+                    $"WebDAV 替换失败：{(int)moved.StatusCode} {moved.ReasonPhrase}",
+                    null, moved.StatusCode);
+        }
+        catch
+        {
+            try
+            {
+                using var delete = new HttpRequestMessage(HttpMethod.Delete, tempUri);
+                using var _ = await _client.SendAsync(delete, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException) { }
+            throw;
+        }
     }
 
     /// <summary>PUT 到图片源根目录；同名文件不覆盖，自动换下一个序号。</summary>

@@ -5,7 +5,7 @@ using NasWallpaper.Services.Cache;
 
 namespace NasWallpaper.Services.Sources;
 
-internal sealed class FileImageSource : IImageSource, IImageUploader
+internal sealed class FileImageSource : IImageSource, IImageUploader, IImageReplacer
 {
     private const int ScanLimit = 10_000;
     private readonly string _root;
@@ -53,6 +53,34 @@ internal sealed class FileImageSource : IImageSource, IImageUploader
         await Task.Run(() => File.Copy(localPath, target, overwrite: false), ct)
             .ConfigureAwait(false);
         return target;
+    }
+
+    /// <summary>
+    /// 旋转等操作后覆盖原文件：先写同目录的临时文件，成功后再原子替换，
+    /// 中途失败（断网、断电）不会留下半张图。
+    /// </summary>
+    public async Task ReplaceAsync(string location, Stream content, CancellationToken ct)
+    {
+        var path = Path.GetFullPath(location);
+        var directory = Path.GetDirectoryName(path)
+            ?? throw new IOException("无法确定图片所在目录。");
+        var temp = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write,
+                FileShare.None, 81920, FileOptions.Asynchronous))
+            {
+                await content.CopyToAsync(output, ct).ConfigureAwait(false);
+            }
+            await Task.Run(() => File.Move(temp, path, overwrite: true), ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            try { if (File.Exists(temp)) File.Delete(temp); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            throw;
+        }
     }
 
     /// <summary>同名文件已存在时改成“名字 (1).jpg”，避免覆盖 NAS 上已有的图片。</summary>

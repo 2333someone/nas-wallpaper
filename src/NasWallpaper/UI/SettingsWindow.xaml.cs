@@ -66,6 +66,7 @@ public partial class SettingsWindow : Window
     public event Func<string, bool, Task<IReadOnlyList<SourceFile>>>? ImagesRequested;
     public event Func<string, GalleryThumbnailLoader?>? ThumbnailLoaderRequested;
     public event Func<string, SourceFile, Task<bool>>? ApplyImageRequested;
+    public event Func<string, SourceFile, RotateDirection, Task<RotateImageResult>>? RotateImageRequested;
     public event Func<string, string, Task<ImportImageResult>>? ImportImageRequested;
     public event Action? ExitRequested;
 
@@ -356,6 +357,35 @@ public partial class SettingsWindow : Window
                 RefreshStatuses();
                 await LoadGalleryAsync(refresh: false);
                 return true;
+            },
+            async (file, direction) =>
+            {
+                if (RotateImageRequested is null)
+                    return new RotateImageResult(false, "当前版本不支持旋转。");
+
+                var result = await RotateImageRequested(monitor.Model.MonitorId, file, direction);
+                if (!result.Success) return result;
+
+                // 图片内容变了，壁纸库里这张卡片要按新的文件版本重新取缩略图。
+                var updated = file with
+                {
+                    Length = result.Length,
+                    LastWriteUtc = result.LastWriteUtc
+                };
+                var galleryIndex = _galleryFiles.FindIndex(f =>
+                    string.Equals(f.Location, file.Location, StringComparison.OrdinalIgnoreCase));
+                if (galleryIndex >= 0) _galleryFiles[galleryIndex] = updated;
+
+                var item = _viewModel.Gallery.Images.FirstOrDefault(i =>
+                    string.Equals(i.File.Location, file.Location, StringComparison.OrdinalIgnoreCase));
+                if (item is not null)
+                {
+                    item.UpdateFile(updated);
+                    _ = LoadThumbnailAsync(item);
+                }
+
+                RefreshStatuses();
+                return result;
             })
         {
             Owner = this

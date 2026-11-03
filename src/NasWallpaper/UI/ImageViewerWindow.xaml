@@ -159,7 +159,23 @@
                            TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="RotateLeftButton" Style="{StaticResource ViewerButton}" Padding="12,0"
+                            Click="RotateLeft_Click" ToolTip="把这张图逆时针旋转 90° 并写回图片源">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#x21BA;" FontSize="15" VerticalAlignment="Center" TextWrapping="NoWrap" />
+                            <TextBlock Text="逆时针" Margin="7,0,0,0" VerticalAlignment="Center" TextWrapping="NoWrap" />
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="RotateRightButton" Style="{StaticResource ViewerButton}" Padding="12,0"
+                            Margin="8,0,0,0" Click="RotateRight_Click"
+                            ToolTip="把这张图顺时针旋转 90° 并写回图片源">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#x21BB;" FontSize="15" VerticalAlignment="Center" TextWrapping="NoWrap" />
+                            <TextBlock Text="顺时针" Margin="7,0,0,0" VerticalAlignment="Center" TextWrapping="NoWrap" />
+                        </StackPanel>
+                    </Button>
                     <Button x:Name="DeleteButton" Style="{StaticResource ViewerButton}" Content="删除这张"
+                            Margin="8,0,0,0"
                             Foreground="{DynamicResource TextSecondary}" Click="Delete_Click"
                             ToolTip="从 NAS 上删除这张原图（需要再点一次确认）" />
                     <Button x:Name="ApplyButton" Style="{StaticResource ViewerPrimaryButton}" Click="Apply_Click"
