@@ -227,6 +227,7 @@ public sealed class RotationEngine : IAsyncDisposable
             }
 
             var lastWrite = DateTimeOffset.UtcNow;
+            var isCurrent = false;
             lock (_sync)
             {
                 if (_states.TryGetValue(monitorId, out var state))
@@ -243,74 +244,44 @@ public sealed class RotationEngine : IAsyncDisposable
                             };
                     }
                     // 原图内容变了，旧缓存作废，下次会被重新生成。
-                    if (string.Equals(state.LastSourcePath, file.Location, StringComparison.OrdinalIgnoreCase))
-                        monitor.LastGoodPath = null;
+                    isCurrent = string.Equals(
+                        state.LastSourcePath, file.Location, StringComparison.OrdinalIgnoreCase);
+                    if (isCurrent) monitor.LastGoodPath = null;
                 }
             }
 
-            return new(true, "已旋转并写回图片源", rotated.Length, lastWrite);
+            if (!isCurrent) return new(true, "已旋转并写回图片源", rotated.Length, lastWrite);
+
+            // 改的就是桌面上正在显示的那张，立刻重新应用，让方向当场变化。
+            var applied = await ApplyImageAsync(monitorId, file with
+            {
+                Length = rotated.Length,
+                LastWriteUtc = lastWrite
+            }).ConfigureAwait(false);
+
+            return applied
+                ? new(true, "已旋转并更新桌面", rotated.Length, lastWrite)
+                : new(true, "已旋转并写回，桌面刷新失败，可点“设为壁纸”重试", rotated.Length, lastWrite);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException
             or NotSupportedException or ArgumentException or InvalidOperationException
             or System.Runtime.InteropServices.COMException)
         {
-            return new(false, "旋转失败：" + DescribeFailure(ex));
+            var message = "旋转失败：" + DescribeFailure(ex);
+            Log($"{message}（{file.Location}）");
+            return new(false, message);
         }
     }
 
-    /// <summary>
-    /// 旋转当前正在显示的那张原图，并立即重新设为壁纸。
-    /// 概览页同心圆上的快捷按钮走这里；当前显示的是缓存兜底图时无法旋转。
-    /// </summary>
-    public async Task<RotateImageResult> RotateCurrentWallpaperAsync(
-        RotateDirection direction, CancellationToken ct)
+    /// <summary>把失败原因留到配置文件目录的 error.log，方便排查写回权限等问题。</summary>
+    private void Log(string message)
     {
-        DisplayInfo? target;
         try
         {
-            var displays = _wallpaper.GetDisplays();
-            target = displays.FirstOrDefault(d => d.IsPrimary) ?? displays.FirstOrDefault();
+            File.AppendAllText(Path.Combine(_store.RootDirectory, "error.log"),
+                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
         }
-        catch (System.Runtime.InteropServices.COMException)
-        {
-            target = null;
-        }
-        if (target is null) return new(false, "没有检测到已连接的显示器。");
-
-        string? location;
-        SourceFile? known;
-        lock (_sync)
-        {
-            if (_states.TryGetValue(target.Id, out var state))
-            {
-                location = state.LastSourcePath;
-                known = state.Files?.FirstOrDefault(f =>
-                    string.Equals(f.Location, location, StringComparison.OrdinalIgnoreCase));
-            }
-            else
-            {
-                location = null;
-                known = null;
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(location))
-            return new(false, "当前壁纸不是图片源里的原图，无法旋转。");
-
-        var file = known ?? new SourceFile(location!, 0, default);
-        var rotated = await RotateImageAsync(target.Id, file, direction, ct).ConfigureAwait(false);
-        if (!rotated.Success) return rotated;
-
-        var updated = file with
-        {
-            Length = rotated.Length,
-            LastWriteUtc = rotated.LastWriteUtc
-        };
-        var applied = await ApplyImageAsync(target.Id, updated).ConfigureAwait(false);
-        return rotated with
-        {
-            Message = applied ? "已旋转并更新桌面" : "图片已旋转，但重新设置壁纸失败"
-        };
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     /// <summary>确认要删的文件确实位于该显示器的图片源目录内。</summary>

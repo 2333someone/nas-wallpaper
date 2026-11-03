@@ -700,31 +700,6 @@
             </Setter>
         </Style>
 
-        <!-- 概览页同心圆：透明圆形命中区域，不遮挡原有线条，只在悬停时淡淡填充 -->
-        <Style x:Key="RingButton" TargetType="Button">
-            <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="Focusable" Value="False" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Grid>
-                            <Ellipse x:Name="Hover" Fill="Transparent"
-                                     Width="{TemplateBinding Width}" Height="{TemplateBinding Height}" />
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Grid>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Hover" Property="Fill" Value="{DynamicResource HeroRing}" />
-                                <Setter TargetName="Hover" Property="Opacity" Value="0.55" />
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Hover" Property="Opacity" Value="0.8" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
     </Window.Resources>
 
     <!-- ==== 根容器 ==== -->
@@ -880,20 +855,13 @@
                                             </StackPanel>
                                         </StackPanel>
                                         <Grid Grid.Column="1" Width="156" Height="156" VerticalAlignment="Center"
-                                              Margin="24,0,6,0">
+                                              IsHitTestVisible="False" Margin="24,0,6,0">
                                             <Ellipse Width="156" Height="156" Stroke="{DynamicResource HeroRingStroke}" StrokeThickness="1" />
                                             <Ellipse Width="112" Height="112" Stroke="{DynamicResource HeroRingStrokeSoft}" StrokeThickness="1" />
                                             <Ellipse Width="76" Height="76" Fill="{DynamicResource HeroRing}" />
                                             <TextBlock Text="&#xE91B;" FontFamily="{StaticResource IconFont}" FontSize="22"
                                                        Foreground="{DynamicResource HeroBody}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                                        TextWrapping="NoWrap" />
-                                            <!-- 外圈顺时针、内圈逆时针：透明命中区域，原来的线条保持不变。 -->
-                                            <Button x:Name="QuickRotateClockwiseButton" Width="156" Height="156"
-                                                    Style="{StaticResource RingButton}" Click="QuickRotateClockwise_Click"
-                                                    ToolTip="顺时针旋转当前壁纸 90°（直接写回图片源）" />
-                                            <Button x:Name="QuickRotateCounterClockwiseButton" Width="112" Height="112"
-                                                    Style="{StaticResource RingButton}" Click="QuickRotateCounterClockwise_Click"
-                                                    ToolTip="逆时针旋转当前壁纸 90°（直接写回图片源）" />
                                         </Grid>
                                     </Grid>
                                 </Border>

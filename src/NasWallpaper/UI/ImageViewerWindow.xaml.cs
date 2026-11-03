@@ -171,7 +171,7 @@ public partial class ImageViewerWindow : Window
                 LastWriteUtc = result.LastWriteUtc
             };
             await ShowCurrentAsync();
-            StatusText.Text = "已写回图片源，点“设为壁纸”立即生效";
+            StatusText.Text = result.Message;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
             System.Net.Http.HttpRequestException or NotSupportedException or ArgumentException or

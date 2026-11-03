@@ -345,6 +345,62 @@ public sealed class CoreTests : IDisposable
     }
 
     [Fact]
+    public async Task RotatingCurrentImageReappliesWallpaper()
+    {
+        var source = Path.Combine(_root, "pictures");
+        var path = Path.Combine(source, "wallpaper.jpg");
+        CreateImage(path, 320, 200);
+
+        var store = new ConfigStore(Path.Combine(_root, "data"));
+        var wallpaper = new FakeWallpaper();
+        var config = new AppConfig();
+        config.Monitors.Add(new MonitorConfig
+        {
+            MonitorId = "display-1",
+            Source = new() { Kind = SourceKind.Local, Address = source }
+        });
+        await using var engine = new RotationEngine(store, config, wallpaper);
+        await engine.NextAsync();
+        Assert.Single(wallpaper.Applied);
+
+        var info = new FileInfo(path);
+        var file = new SourceFile(info.FullName, info.Length, info.LastWriteTimeUtc);
+        var result = await engine.RotateImageAsync(
+            "display-1", file, RotateDirection.Clockwise, default);
+
+        Assert.True(result.Success, result.Message);
+        // 旋转的正是当前壁纸，应该自动再应用一次，让桌面方向当场变化。
+        Assert.Equal(2, wallpaper.Applied.Count);
+        Assert.Equal(path, wallpaper.Applied[1].Path);
+    }
+
+    [Fact]
+    public async Task ThumbnailRefreshesAfterImageIsReplaced()
+    {
+        var source = Path.Combine(_root, "pictures");
+        var path = Path.Combine(source, "wallpaper.jpg");
+        CreateImage(path, 320, 200);
+        var info = new FileInfo(path);
+        var file = new SourceFile(info.FullName, info.Length, info.LastWriteTimeUtc);
+
+        var cache = new ImageCache(Path.Combine(_root, "cache"));
+        using var loader = new GalleryThumbnailLoader(
+            new SourceConfig { Kind = SourceKind.Local, Address = source }, cache);
+
+        var before = await loader.LoadAsync(file, 400, default);
+        Assert.Equal(320, before!.Width);
+
+        File.WriteAllBytes(path, ImageRotator.Rotate(
+            File.ReadAllBytes(path), ".jpg", RotateDirection.Clockwise));
+        var after = new FileInfo(path);
+        var updated = file with { Length = after.Length, LastWriteUtc = after.LastWriteTimeUtc };
+
+        var refreshed = await loader.LoadAsync(updated, 400, default);
+        Assert.Equal(200, refreshed!.Width);
+        Assert.Equal(320, refreshed.Height);
+    }
+
+    [Fact]
     public void RotatingImageSwapsDimensions()
     {
         var path = Path.Combine(_root, "rotate.jpg");

@@ -136,9 +136,6 @@ public partial class App : System.Windows.Application
             _settings.RotateImageRequested += (monitorId, file, direction) => _engine is null
                 ? Task.FromResult(new RotateImageResult(false, "壁纸引擎尚未启动。"))
                 : _engine.RotateImageAsync(monitorId, file, direction, CancellationToken.None);
-            _settings.QuickRotateRequested += direction => _engine is null
-                ? Task.FromResult(new RotateImageResult(false, "壁纸引擎尚未启动。"))
-                : _engine.RotateCurrentWallpaperAsync(direction, CancellationToken.None);
             _settings.ImportImageRequested += (monitorId, path) => _engine is null
                 ? Task.FromResult(new ImportImageResult(false, "壁纸引擎尚未启动。"))
                 : _engine.ImportImageAsync(monitorId, path);
