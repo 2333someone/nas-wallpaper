@@ -67,6 +67,7 @@ public partial class SettingsWindow : Window
     public event Func<string, GalleryThumbnailLoader?>? ThumbnailLoaderRequested;
     public event Func<string, SourceFile, Task<bool>>? ApplyImageRequested;
     public event Func<string, SourceFile, RotateDirection, Task<RotateImageResult>>? RotateImageRequested;
+    public event Func<RotateDirection, Task<RotateImageResult>>? QuickRotateRequested;
     public event Func<string, string, Task<ImportImageResult>>? ImportImageRequested;
     public event Action? ExitRequested;
 
@@ -492,6 +493,37 @@ public partial class SettingsWindow : Window
         if (!IsInitialized || sender is not RadioButton button) return;
         var index = button.CommandParameter is string text && int.TryParse(text, out var parsed) ? parsed : 0;
         ShowPage(index);
+    }
+
+    private bool _quickRotating;
+
+    private async void QuickRotateClockwise_Click(object sender, RoutedEventArgs e) =>
+        await QuickRotateCurrentAsync(RotateDirection.Clockwise);
+
+    private async void QuickRotateCounterClockwise_Click(object sender, RoutedEventArgs e) =>
+        await QuickRotateCurrentAsync(RotateDirection.CounterClockwise);
+
+    /// <summary>概览页同心圆按钮：旋转当前桌面壁纸对应的原图并立即重新应用。</summary>
+    private async Task QuickRotateCurrentAsync(RotateDirection direction)
+    {
+        if (_quickRotating || QuickRotateRequested is null) return;
+        _quickRotating = true;
+        try
+        {
+            var result = await QuickRotateRequested(direction);
+            ShowToast(result.Message, !result.Success);
+            if (result.Success) RefreshStatuses();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            System.Net.Http.HttpRequestException or NotSupportedException or ArgumentException or
+            InvalidOperationException)
+        {
+            ShowToast("旋转失败：" + ex.Message, true);
+        }
+        finally
+        {
+            _quickRotating = false;
+        }
     }
 
     /// <summary>第一次点击进入确认状态并记下当时的图片，第二次点击才真正删除。</summary>

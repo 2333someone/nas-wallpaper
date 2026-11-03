@@ -258,6 +258,61 @@ public sealed class RotationEngine : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// 旋转当前正在显示的那张原图，并立即重新设为壁纸。
+    /// 概览页同心圆上的快捷按钮走这里；当前显示的是缓存兜底图时无法旋转。
+    /// </summary>
+    public async Task<RotateImageResult> RotateCurrentWallpaperAsync(
+        RotateDirection direction, CancellationToken ct)
+    {
+        DisplayInfo? target;
+        try
+        {
+            var displays = _wallpaper.GetDisplays();
+            target = displays.FirstOrDefault(d => d.IsPrimary) ?? displays.FirstOrDefault();
+        }
+        catch (System.Runtime.InteropServices.COMException)
+        {
+            target = null;
+        }
+        if (target is null) return new(false, "没有检测到已连接的显示器。");
+
+        string? location;
+        SourceFile? known;
+        lock (_sync)
+        {
+            if (_states.TryGetValue(target.Id, out var state))
+            {
+                location = state.LastSourcePath;
+                known = state.Files?.FirstOrDefault(f =>
+                    string.Equals(f.Location, location, StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                location = null;
+                known = null;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(location))
+            return new(false, "当前壁纸不是图片源里的原图，无法旋转。");
+
+        var file = known ?? new SourceFile(location!, 0, default);
+        var rotated = await RotateImageAsync(target.Id, file, direction, ct).ConfigureAwait(false);
+        if (!rotated.Success) return rotated;
+
+        var updated = file with
+        {
+            Length = rotated.Length,
+            LastWriteUtc = rotated.LastWriteUtc
+        };
+        var applied = await ApplyImageAsync(target.Id, updated).ConfigureAwait(false);
+        return rotated with
+        {
+            Message = applied ? "已旋转并更新桌面" : "图片已旋转，但重新设置壁纸失败"
+        };
+    }
+
     /// <summary>确认要删的文件确实位于该显示器的图片源目录内。</summary>
     private static bool IsInSource(SourceConfig source, string path)
     {

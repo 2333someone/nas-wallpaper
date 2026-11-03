@@ -175,8 +175,13 @@ public sealed class CoreTests : IDisposable
 
         var picked = wallpaper.Applied.Select(a => Path.GetFileName(a.Path)).ToList();
         Assert.Equal(12, picked.Count);
-        // 最近 10 张不重复，所以连续 12 次应全部不同，且不再局限于固定的小列表。
-        Assert.Equal(12, picked.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        // 设计是“最近 10 张不重复”，因此任意连续 10 次内部不能出现重复；
+        // 第 11 次允许和第 1 次相同，所以不能要求 12 次全部不同。
+        for (var i = 0; i + 10 <= picked.Count; i++)
+        {
+            var window = picked.Skip(i).Take(10).ToList();
+            Assert.Equal(10, window.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        }
     }
 
     [Fact]
