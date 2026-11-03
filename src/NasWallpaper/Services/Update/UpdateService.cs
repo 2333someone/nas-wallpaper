@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -13,7 +14,8 @@ public sealed record UpdateInfo(
     string PageUrl,
     string? AssetName,
     string? DownloadUrl,
-    long Size);
+    long Size,
+    string? ApiDownloadUrl = null);
 
 /// <summary>
 /// 直接以 GitHub Releases 作为更新源：检查 /releases/latest，
@@ -23,6 +25,7 @@ public static class UpdateService
 {
     private const string RepositoryPrefix = "https://api.github.com/repos/";
     private static readonly HttpClient Client = CreateClient();
+    private static readonly HttpClient DownloadClient = CreateDownloadClient();
 
     public static Version CurrentVersion =>
         typeof(UpdateService).Assembly.GetName().Version ?? new Version(0, 1, 0);
@@ -162,18 +165,22 @@ public static class UpdateService
 
         string? assetName = null;
         string? downloadUrl = null;
+        string? apiDownloadUrl = null;
         long size = 0;
         if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
         {
             // GitHub 会把资产名里的空格改成点/横线，所以按“自包含版优先、体积最大”挑选。
-            var candidates = new List<(string Name, string Url, long Size)>();
+            var candidates = new List<(string Name, string Url, string ApiUrl, long Size)>();
             foreach (var asset in assets.EnumerateArray())
             {
                 var name = asset.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
                 if (!name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) continue;
                 var url = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
                 var bytes = asset.TryGetProperty("size", out var s) && s.TryGetInt64(out var b) ? b : 0;
-                candidates.Add((name, url ?? "", bytes));
+                var apiUrl = asset.TryGetProperty("id", out var id) && id.TryGetInt64(out var assetId)
+                    ? $"{RepositoryPrefix}{repository}/releases/assets/{assetId}"
+                    : "";
+                candidates.Add((name, url ?? "", apiUrl, bytes));
             }
 
             var pick = candidates
@@ -182,26 +189,64 @@ public static class UpdateService
                 .FirstOrDefault();
             assetName = pick.Name;
             downloadUrl = pick.Url;
+            apiDownloadUrl = pick.ApiUrl;
             size = pick.Size;
         }
 
         if (string.IsNullOrWhiteSpace(downloadUrl))
             throw new InvalidOperationException("这个 Release 里没有 .exe 资产，无法自动更新。");
 
-        return new UpdateInfo(version.ToString(), tag, notes, page, assetName, downloadUrl, size);
+        return new UpdateInfo(version.ToString(), tag, notes, page, assetName, downloadUrl, size, apiDownloadUrl);
     }
 
+    /// <summary>
+    /// 依次尝试下载通道：先走 releases/download（浏览器同款直链），不行再走 GitHub API 的资产地址。
+    /// 后者在 github.com 被墙但 api.github.com 可用的网络里仍能下到。
+    /// </summary>
     public static async Task DownloadAsync(
         UpdateInfo info, string destination, IProgress<double>? progress, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(info.DownloadUrl))
-            throw new InvalidOperationException("没有可下载的地址。");
+        var urls = new[] { info.DownloadUrl, info.ApiDownloadUrl }
+            .Where(u => !string.IsNullOrWhiteSpace(u))
+            .Select(u => u!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (urls.Length == 0) throw new InvalidOperationException("没有可下载的地址。");
 
-        using var response = await Client.GetAsync(
-            info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        var errors = new List<string>();
+        foreach (var url in urls)
+        {
+            try
+            {
+                await DownloadFromAsync(url, info.Size, destination, progress, ct).ConfigureAwait(false);
+                return;
+            }
+            catch (Exception ex) when ((ex is HttpRequestException or TaskCanceledException)
+                && !ct.IsCancellationRequested)
+            {
+                errors.Add($"{new Uri(url).Host}：{ex.Message.Trim()}");
+                TryDelete(destination);
+                progress?.Report(0);
+            }
+        }
+
+        throw new HttpRequestException(
+            "下载通道都失败了（" + string.Join("；", errors) + "），可到 Release 页面手动下载。");
+    }
+
+    private static async Task DownloadFromAsync(
+        string url, long expectedSize, string destination,
+        IProgress<double>? progress, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        // API 资产地址要求这个 Accept；直链下载带上也无副作用。
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/octet-stream"));
+
+        using var response = await DownloadClient.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
-        var total = response.Content.Headers.ContentLength ?? info.Size;
+        var total = response.Content.Headers.ContentLength ?? expectedSize;
         await using var input = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         await using var output = new FileStream(destination, FileMode.Create, FileAccess.Write,
             FileShare.None, 81920, FileOptions.Asynchronous);
@@ -214,8 +259,14 @@ public static class UpdateService
             if (read == 0) break;
             await output.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
             received += read;
-            if (total > 0) progress?.Report((double)received / total);
+            if (total > 0) progress?.Report(Math.Min(1d, (double)received / total));
         }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     /// <summary>
@@ -273,5 +324,64 @@ public static class UpdateService
         var client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("NAS-Wallpaper", "1.0"));
         return client;
+    }
+
+    /// <summary>
+    /// 下载专用客户端：显式带上系统代理，并把连接超时压到 15 秒。
+    /// .NET 默认不一定读取 Clash 这类工具写入的 IE 代理设置，之前会卡在 0% 等到十分钟超时。
+    /// </summary>
+    private static HttpClient CreateDownloadClient()
+    {
+        var handler = new SocketsHttpHandler
+        {
+            Proxy = ResolveSystemProxy(),
+            UseProxy = true,
+            ConnectTimeout = TimeSpan.FromSeconds(15)
+        };
+        var client = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(30) };
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("NAS-Wallpaper", "1.0"));
+        return client;
+    }
+
+    /// <summary>先读 HTTP(S)_PROXY 环境变量，再读 Windows 的 IE 代理设置；都没有就交给系统默认。</summary>
+    private static IWebProxy? ResolveSystemProxy()
+    {
+        foreach (var name in new[] { "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy" })
+        {
+            var raw = Environment.GetEnvironmentVariable(name);
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            if (!raw.Contains("://", StringComparison.Ordinal)) raw = "http://" + raw;
+            if (Uri.TryCreate(raw, UriKind.Absolute, out var envUri)) return new WebProxy(envUri);
+        }
+
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Internet Settings");
+            if (key?.GetValue("ProxyEnable") is not int enable || enable == 0) return null;
+            if (key.GetValue("ProxyServer") is not string server || string.IsNullOrWhiteSpace(server)) return null;
+
+            var value = server.Trim();
+            if (value.Contains('='))
+            {
+                var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var part in value.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var pair = part.Split('=', 2);
+                    if (pair.Length == 2) map[pair[0].Trim()] = pair[1].Trim();
+                }
+                value = map.TryGetValue("https", out var https) ? https
+                    : map.TryGetValue("http", out var http) ? http : "";
+            }
+
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            if (!value.Contains("://", StringComparison.Ordinal)) value = "http://" + value;
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri) ? new WebProxy(uri) : null;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException
+            or UnauthorizedAccessException or IOException)
+        {
+            return null;
+        }
     }
 }
