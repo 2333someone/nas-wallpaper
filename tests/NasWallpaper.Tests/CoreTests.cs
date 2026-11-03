@@ -338,6 +338,70 @@ public sealed class CoreTests : IDisposable
         Assert.Equal(1920, cached!.Width);
     }
 
+    [Fact]
+    public async Task MissingDisplayKeepsBoundSource()
+    {
+        var dir = Path.Combine(_root, "data");
+        var source = Path.Combine(_root, "pictures");
+        CreateImage(Path.Combine(source, "a.jpg"), 320, 200);
+        var store = new ConfigStore(dir);
+        var config = new AppConfig();
+        config.Monitors.Add(new MonitorConfig
+        {
+            MonitorId = "display-1",
+            Source = new() { Kind = SourceKind.Local, Address = source }
+        });
+
+        // 模拟锁屏/休眠/切换远程会话时系统暂时枚举不到显示器。
+        await using var engine = new RotationEngine(store, config, new NoDisplaysWallpaper());
+        engine.RefreshDisplaysNow();
+
+        var monitor = Assert.Single(engine.Snapshot.Monitors);
+        Assert.Equal(source, monitor.Source.Address);
+
+        var reopened = new ConfigStore(dir);
+        Assert.Equal(source, Assert.Single(reopened.Load().Monitors).Source.Address);
+    }
+
+    [Fact]
+    public void CorruptSettingsRecoversBoundSourceFromLastGood()
+    {
+        var dir = Path.Combine(_root, "data");
+        var store = new ConfigStore(dir);
+        var config = new AppConfig();
+        config.Monitors.Add(new MonitorConfig
+        {
+            MonitorId = "display-1",
+            Source = new() { Kind = SourceKind.Smb, Address = @"\\nas\photos", Username = "user" }
+        });
+        store.Save(config);
+        Assert.True(File.Exists(Path.Combine(dir, "settings.lastgood.json")));
+
+        File.WriteAllText(Path.Combine(dir, "settings.json"), "{ broken");
+        var reopened = new ConfigStore(dir);
+        var loaded = reopened.Load();
+
+        Assert.True(reopened.RecoveredFromBackup);
+        Assert.Equal(@"\\nas\photos", Assert.Single(loaded.Monitors).Source.Address);
+    }
+
+    [Fact]
+    public void BrokenSettingsIsNotOverwrittenByAutomaticSave()
+    {
+        var dir = Path.Combine(_root, "data");
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "settings.json");
+        File.WriteAllText(path, "not json");
+
+        var store = new ConfigStore(dir);
+        Assert.NotNull(store.Load());
+        Assert.True(store.LoadFailed);
+
+        // 后台轮播的自动保存不能拿空配置覆盖现场。
+        store.Save(new AppConfig());
+        Assert.Equal("not json", File.ReadAllText(path));
+    }
+
     private string Write(string name, int length)
     {
         var path = Path.Combine(_root, name);
@@ -375,5 +439,12 @@ public sealed class CoreTests : IDisposable
         public List<(string Monitor, string Path)> Applied { get; } = [];
         public IReadOnlyList<DisplayInfo> GetDisplays() => [new("display-1", "主显示器", 1920, 1080, true)];
         public void SetWallpaper(string monitorId, string localPath, WallpaperStyle style) => Applied.Add((monitorId, localPath));
+    }
+
+    /// <summary>模拟系统暂时枚举不到任何显示器的时刻。</summary>
+    private sealed class NoDisplaysWallpaper : IWallpaperService
+    {
+        public IReadOnlyList<DisplayInfo> GetDisplays() => [];
+        public void SetWallpaper(string monitorId, string localPath, WallpaperStyle style) { }
     }
 }

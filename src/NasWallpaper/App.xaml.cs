@@ -37,10 +37,14 @@ public partial class App : System.Windows.Application
 
         UpdateService.CleanupOldVersion();
 
-        _mutex = new Mutex(true, "Local\\NAS Wallpaper Single Instance", out var created);
-        if (!created) { Shutdown(); return; }
+        _mutex = CreateSingleInstanceMutex();
+        if (_mutex is null) { Shutdown(); return; }
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
         _config = _store.Load();
+        if (_store.LoadFailed)
+            Log("配置文件读不出来，已暂停自动保存，等你在界面里重新保存一次。");
+        else if (_store.RecoveredFromBackup)
+            Log("配置文件损坏，已从备份恢复上一次的图片源设置。");
         ThemeManager.Apply(_config.Theme);
         try
         {
@@ -63,14 +67,37 @@ public partial class App : System.Windows.Application
         }
         catch (Exception ex)
         {
-            try
-            {
-                Directory.CreateDirectory(_store.CacheDirectory);
-                File.AppendAllText(Path.Combine(_store.CacheDirectory, "error.log"), ex + Environment.NewLine);
-            }
-            catch (Exception logEx) when (logEx is IOException or UnauthorizedAccessException) { }
+            Log(ex.ToString());
             Shutdown();
         }
+    }
+
+    /// <summary>优先用 Global 单实例：本地和远程桌面各开一个时也只允许一个进程写配置。</summary>
+    private static Mutex? CreateSingleInstanceMutex()
+    {
+        try
+        {
+            var global = new Mutex(true, @"Global\NAS Wallpaper Single Instance", out var created);
+            if (created) return global;
+            global.Dispose();
+            return null;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            var local = new Mutex(true, @"Local\NAS Wallpaper Single Instance", out var created);
+            return created ? local : null;
+        }
+    }
+
+    private void Log(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(_store.RootDirectory);
+            File.AppendAllText(Path.Combine(_store.RootDirectory, "error.log"),
+                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
 
@@ -178,7 +205,7 @@ public partial class App : System.Windows.Application
         }
         _store.SetCacheDirectory(config.CacheDirectory);
         if (_engine is not null) await _engine.ApplyConfigAsync(config);
-        else { _config = config; _store.Save(config); }
+        else { _config = config; _store.Save(config, force: true); }
         _config = _engine?.Snapshot ?? config;
         _settings?.LoadConfig(_config, _engine?.GetStatuses(), _store.DefaultCacheDirectory);
         _tray?.UpdatePauseText(_config.Paused);

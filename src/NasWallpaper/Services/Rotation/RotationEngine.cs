@@ -42,6 +42,8 @@ public sealed class RotationEngine : IAsyncDisposable
         _cache = CreateCache(store.CacheDirectory);
         _cacheRoot = _cache.Root;
         EnsureMonitors();
+        // 配置里可能有本轮没枚举到的显示器，先给它们补上运行时状态，后台循环才不会取不到。
+        foreach (var monitor in _config.Monitors) EnsureState(monitor.MonitorId);
         SaveState();
     }
 
@@ -54,7 +56,8 @@ public sealed class RotationEngine : IAsyncDisposable
             {
                 var state = _states.TryGetValue(m.MonitorId, out var runtime) ? runtime : null;
                 var message = state?.Message ?? "等待配置";
-                if (_config.Paused && state?.Files is not null) message = "轮播已暂停";
+                if (!m.IsConnected) message = "显示器未连接，图片源配置已保留";
+                else if (_config.Paused && state?.Files is not null) message = "轮播已暂停";
                 var displayName = state?.CurrentName;
                 if (string.IsNullOrWhiteSpace(displayName) && state?.CurrentImage is { } current)
                     displayName = Path.GetFileName(current);
@@ -92,7 +95,7 @@ public sealed class RotationEngine : IAsyncDisposable
             foreach (var monitor in _config.Monitors)
             {
                 var old = previous.Monitors.FirstOrDefault(p => p.MonitorId == monitor.MonitorId);
-                var state = _states[monitor.MonitorId];
+                var state = EnsureState(monitor.MonitorId);
                 if (old is null || !SourceEquals(old.Source, monitor.Source) || old.IncludePortrait != monitor.IncludePortrait)
                 {
                     state.Files = null;
@@ -128,7 +131,7 @@ public sealed class RotationEngine : IAsyncDisposable
     {
         MonitorConfig[] profiles;
         lock (_sync)
-            profiles = _config.Monitors.Where(p => p.Enabled &&
+            profiles = _config.Monitors.Where(p => p.Enabled && p.IsConnected &&
                 (monitorId is null || p.MonitorId == monitorId)).Select(p => p.CloneMonitor()).ToArray();
         await Task.WhenAll(profiles.Select(AdvanceSafelyAsync));
         Changed?.Invoke();
@@ -216,8 +219,8 @@ public sealed class RotationEngine : IAsyncDisposable
             {
                 MonitorConfig[] due;
                 lock (_sync)
-                    due = _config.Paused ? [] : _config.Monitors.Where(p => p.Enabled &&
-                        _states[p.MonitorId].NextChange <= DateTimeOffset.UtcNow)
+                    due = _config.Paused ? [] : _config.Monitors.Where(p => p.Enabled && p.IsConnected &&
+                        EnsureState(p.MonitorId).NextChange <= DateTimeOffset.UtcNow)
                         .Select(p => p.CloneMonitor()).ToArray();
                 await Task.WhenAll(due.Select(AdvanceSafelyAsync));
                 if (DateTimeOffset.UtcNow - _lastDisplayCheck > TimeSpan.FromSeconds(15))
@@ -257,7 +260,7 @@ public sealed class RotationEngine : IAsyncDisposable
     private async Task AdvanceAsync(MonitorConfig profile, CancellationToken ct)
     {
         MonitorRuntime state;
-        lock (_sync) state = _states[profile.MonitorId];
+        lock (_sync) state = EnsureState(profile.MonitorId);
         if (string.IsNullOrWhiteSpace(profile.Source.Address))
         {
             state.NextChange = DateTimeOffset.MaxValue;
@@ -354,7 +357,7 @@ public sealed class RotationEngine : IAsyncDisposable
     {
         MonitorConfig[] profiles;
         lock (_sync)
-            profiles = _config.Monitors.Where(p => p.Enabled &&
+            profiles = _config.Monitors.Where(p => p.Enabled && p.IsConnected &&
                 (monitorId is null || p.MonitorId == monitorId)).Select(p => p.CloneMonitor()).ToArray();
 
         foreach (var profile in profiles)
@@ -363,7 +366,7 @@ public sealed class RotationEngine : IAsyncDisposable
             if (!await gate.WaitAsync(0)) continue;
             try
             {
-                var state = _states[profile.MonitorId];
+                var state = EnsureState(profile.MonitorId);
                 var previous = state.PreviousPath;
                 var file = string.IsNullOrWhiteSpace(previous) || state.Files is null
                     ? null
@@ -406,7 +409,7 @@ public sealed class RotationEngine : IAsyncDisposable
             var monitor = _config.Monitors.FirstOrDefault(m => m.MonitorId == monitorId);
             if (monitor is null) return [];
             profile = monitor.CloneMonitor();
-            state = _states[monitorId];
+            state = EnsureState(monitorId);
         }
 
         if (string.IsNullOrWhiteSpace(profile.Source.Address)) return [];
@@ -471,7 +474,7 @@ public sealed class RotationEngine : IAsyncDisposable
         try
         {
             using var source = new SourceLease(profile.Source);
-            var state = _states[monitorId];
+            var state = EnsureState(monitorId);
             await ApplyChosenAsync(profile, state, source.Value, file,
                 trackHistory: false, CancellationToken.None);
             Changed?.Invoke();
@@ -652,7 +655,7 @@ public sealed class RotationEngine : IAsyncDisposable
 
     private async Task UseFallbackAsync(MonitorConfig profile, Exception? error = null)
     {
-        var state = _states[profile.MonitorId];
+        var state = EnsureState(profile.MonitorId);
         var path = new[] { state.FallbackPath, profile.LastGoodPath, profile.LocalDefaultPath }
             .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p));
         if (path is null) path = EnsureDefaultImage();
@@ -681,17 +684,32 @@ public sealed class RotationEngine : IAsyncDisposable
         return Task.CompletedTask;
     }
 
-    /// <summary>按当前真实连接的显示器同步配置，返回是否有增删（界面可据此立即刷新列表）。</summary>
+    /// <summary>
+    /// 按当前真实连接的显示器同步配置，返回是否有增删（界面可据此立即刷新列表）。
+    /// 只增改、不删除：显示器暂时消失（休眠唤醒、锁屏、切换远程会话、DP 重新握手、
+    /// 换接口后 UID 变化）时，系统枚举可能返回空列表或少一项。此时绝不能顺手删掉
+    /// 对应的图片源配置，否则一次误判就会把 NAS 地址、账号、密码永久写没。
+    /// </summary>
     public bool RefreshDisplaysNow()
     {
         bool changed;
         lock (_sync)
         {
-            var before = _config.Monitors.Select(p => p.MonitorId).ToList();
+            var beforeIds = _config.Monitors.Select(p => p.MonitorId).ToList();
+            var beforeConnected = _config.Monitors.ToDictionary(
+                p => p.MonitorId, p => p.IsConnected, StringComparer.Ordinal);
+
             var connected = _wallpaper.GetDisplays();
-            _config.Monitors.RemoveAll(p => connected.All(d => d.Id != p.MonitorId));
+            // 一次都没枚举到多半是会话/桌面还没就绪，直接放弃本轮，等下一次轮询再说。
+            if (connected.Count == 0) return false;
+
+            var ids = connected.Select(d => d.Id).ToHashSet(StringComparer.Ordinal);
+            foreach (var monitor in _config.Monitors) monitor.IsConnected = ids.Contains(monitor.MonitorId);
             foreach (var display in connected) EnsureMonitor(display);
-            changed = !before.SequenceEqual(_config.Monitors.Select(p => p.MonitorId));
+
+            changed = !beforeIds.SequenceEqual(_config.Monitors.Select(p => p.MonitorId)) ||
+                _config.Monitors.Any(p =>
+                    !beforeConnected.TryGetValue(p.MonitorId, out var was) || was != p.IsConnected);
         }
         if (!changed) return false;
         SaveState();
@@ -713,7 +731,19 @@ public sealed class RotationEngine : IAsyncDisposable
             _config.Monitors.Add(monitor);
         }
         else monitor.Name = display.Name;
-        if (!_states.ContainsKey(display.Id)) _states[display.Id] = new MonitorRuntime();
+        monitor.IsConnected = true;
+        EnsureState(display.Id);
+    }
+
+    /// <summary>取（必要时创建）某台显示器的运行时状态；调用方需自行持有 _sync。</summary>
+    private MonitorRuntime EnsureState(string monitorId)
+    {
+        if (!_states.TryGetValue(monitorId, out var state))
+        {
+            state = new MonitorRuntime();
+            _states[monitorId] = state;
+        }
+        return state;
     }
 
     private async Task CleanupAsync()

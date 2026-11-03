@@ -150,6 +150,7 @@ public sealed class SettingsViewModel : ObservableObject
 
         var galleryMonitorId = Gallery.SelectedMonitor?.Model.MonitorId;
         Gallery.SelectedMonitor = Monitors.FirstOrDefault(m => m.Model.MonitorId == galleryMonitorId)
+            ?? Monitors.FirstOrDefault(m => m.Model.IsConnected)
             ?? Monitors.FirstOrDefault();
 
         if (statuses is not null) ApplyStatuses(statuses);

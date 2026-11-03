@@ -53,6 +53,13 @@ public sealed class MonitorConfig
     public SourceConfig Source { get; set; } = new();
     public string? LastGoodPath { get; set; }
     public string? LastWallpaperPath { get; set; }
+
+    /// <summary>
+    /// 运行时标记：这台显示器当前是否被系统枚举到。只存在于内存，不写入配置文件。
+    /// 显示器暂时消失（休眠、锁屏、切换远程会话、换接口）时保留整条配置，避免图片源被误删。
+    /// </summary>
+    [JsonIgnore]
+    public bool IsConnected { get; set; } = true;
 }
 
 public sealed class SourceConfig : System.ComponentModel.INotifyPropertyChanged
