@@ -369,9 +369,38 @@ public sealed class CoreTests : IDisposable
             "display-1", file, RotateDirection.Clockwise, default);
 
         Assert.True(result.Success, result.Message);
-        // 旋转的正是当前壁纸，应该自动再应用一次，让桌面方向当场变化。
+        // 旋转的正是当前壁纸，应该自动再应用一次；同一路径 Windows 不会刷新，所以必须换成新副本。
         Assert.Equal(2, wallpaper.Applied.Count);
-        Assert.Equal(path, wallpaper.Applied[1].Path);
+        Assert.NotEqual(path, wallpaper.Applied[1].Path);
+        Assert.True(File.Exists(wallpaper.Applied[1].Path));
+    }
+
+    [Fact]
+    public async Task ReapplyingSameImageUsesFreshCopy()
+    {
+        var source = Path.Combine(_root, "pictures");
+        var path = Path.Combine(source, "wallpaper.jpg");
+        CreateImage(path, 320, 200);
+
+        var store = new ConfigStore(Path.Combine(_root, "data"));
+        var wallpaper = new FakeWallpaper();
+        var config = new AppConfig();
+        config.Monitors.Add(new MonitorConfig
+        {
+            MonitorId = "display-1",
+            Source = new() { Kind = SourceKind.Local, Address = source }
+        });
+        await using var engine = new RotationEngine(store, config, wallpaper);
+
+        var info = new FileInfo(path);
+        var file = new SourceFile(path, info.Length, info.LastWriteTimeUtc);
+        Assert.True(await engine.ApplyImageAsync("display-1", file));
+        Assert.Equal(path, wallpaper.Applied[0].Path);
+
+        // 同一张图再设一次：路径必须变，否则系统不会重新读图。
+        Assert.True(await engine.ApplyImageAsync("display-1", file));
+        Assert.NotEqual(path, wallpaper.Applied[1].Path);
+        Assert.True(File.Exists(wallpaper.Applied[1].Path));
     }
 
     [Fact]

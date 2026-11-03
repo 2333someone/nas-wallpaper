@@ -252,16 +252,42 @@ public sealed class RotationEngine : IAsyncDisposable
 
             if (!isCurrent) return new(true, "已旋转并写回图片源", rotated.Length, lastWrite);
 
-            // 改的就是桌面上正在显示的那张，立刻重新应用，让方向当场变化。
-            var applied = await ApplyImageAsync(monitorId, file with
-            {
-                Length = rotated.Length,
-                LastWriteUtc = lastWrite
-            }).ConfigureAwait(false);
+            // 改的就是桌面正在显示的那张：用刚生成的字节写一个全新的壁纸文件。
+            // Windows 对同一路径不会重新读图，只有换路径才能真正刷新。
+            var refresh = Path.Combine(_cache.Root, $"rotated-{Guid.NewGuid():N}{extension}");
+            string? previousWallpaper;
+            lock (_sync) previousWallpaper = EnsureState(monitorId).CurrentImage;
 
-            return applied
-                ? new(true, "已旋转并更新桌面", rotated.Length, lastWrite)
-                : new(true, "已旋转并写回，桌面刷新失败，可点“设为壁纸”重试", rotated.Length, lastWrite);
+            try
+            {
+                await Task.Run(() => File.WriteAllBytes(refresh, rotated), ct).ConfigureAwait(false);
+                await Task.Run(
+                    () => _wallpaper.SetWallpaper(monitorId, refresh, Snapshot.Style), ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                or System.Runtime.InteropServices.COMException)
+            {
+                Log($"旋转后刷新桌面失败：{DescribeFailure(ex)}（{file.Location}）");
+                DeleteTemporaryWallpaper(refresh);
+                return new(true, "已旋转并写回，桌面刷新失败，可点“设为壁纸”重试", rotated.Length, lastWrite);
+            }
+
+            lock (_sync)
+            {
+                var state = EnsureState(monitorId);
+                state.FallbackPath = refresh;
+                state.CurrentImage = refresh;
+                state.CurrentName = Path.GetFileName(file.Location);
+                state.Message = "已旋转并更新桌面";
+                state.Failures = 0;
+                state.NextChange = DateTimeOffset.UtcNow.AddMinutes(monitor.IntervalMinutes);
+                monitor.LastWallpaperPath = refresh;
+            }
+            DeleteTemporaryWallpaper(previousWallpaper, refresh);
+            SaveState();
+            Changed?.Invoke();
+
+            return new(true, "已旋转并更新桌面", rotated.Length, lastWrite);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException
             or NotSupportedException or ArgumentException or InvalidOperationException
@@ -407,10 +433,17 @@ public sealed class RotationEngine : IAsyncDisposable
         {
             // SMB / 本地：直接把 NAS 上的原图交给系统当壁纸，缓存只作断网备份。
             appliedPath = chosen.Location;
+            var reusedPath = string.Equals(state.CurrentImage, appliedPath, StringComparison.OrdinalIgnoreCase);
+            if (reusedPath)
+            {
+                // Windows 对同一路径不会重新读图，即使文件内容变了也不刷新，
+                // 所以重复设置同一张时先复制成一个新文件，再交给系统。
+                appliedPath = await CreateRefreshCopyAsync(chosen.Location, ct);
+            }
             try
             {
                 await Task.Run(() => _wallpaper.SetWallpaper(profile.MonitorId, appliedPath, Snapshot.Style), ct);
-                message = "来自 NAS";
+                message = reusedPath ? "来自 NAS · 已刷新" : "来自 NAS";
                 QueueFallbackCopy(profile, chosen);
             }
             catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or IOException or
@@ -437,6 +470,7 @@ public sealed class RotationEngine : IAsyncDisposable
         }
 
         if (trackHistory) state.PreviousPath = previousLocation;
+        var replacedTemporary = state.CurrentImage;
         state.CurrentImage = appliedPath;
         state.LastSourcePath = chosen.Location;
         state.CurrentName = Path.GetFileName(chosen.Location);
@@ -448,7 +482,31 @@ public sealed class RotationEngine : IAsyncDisposable
             var current = _config.Monitors.FirstOrDefault(p => p.MonitorId == profile.MonitorId);
             if (current is not null) current.LastWallpaperPath = appliedPath;
         }
+        DeleteTemporaryWallpaper(replacedTemporary, appliedPath);
         SaveState();
+    }
+
+    /// <summary>把图片复制成缓存目录里的新文件，让系统重新读取同名但内容已变的壁纸。</summary>
+    private async Task<string> CreateRefreshCopyAsync(string path, CancellationToken ct)
+    {
+        var copy = Path.Combine(_cache.Root, $"apply-{Guid.NewGuid():N}{Path.GetExtension(path)}");
+        await Task.Run(() => File.Copy(path, copy, overwrite: true), ct).ConfigureAwait(false);
+        return copy;
+    }
+
+    /// <summary>清掉上一张临时壁纸副本；只处理本程序自己生成的 apply-/rotated- 文件。</summary>
+    private void DeleteTemporaryWallpaper(string? path, string? keep = null)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        if (string.Equals(path, keep, StringComparison.OrdinalIgnoreCase)) return;
+
+        var name = Path.GetFileName(path);
+        if (!name.StartsWith("apply-", StringComparison.OrdinalIgnoreCase) &&
+            !name.StartsWith("rotated-", StringComparison.OrdinalIgnoreCase)) return;
+        if (!string.Equals(Path.GetDirectoryName(path), _cache.Root, StringComparison.OrdinalIgnoreCase)) return;
+
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     /// <summary>回到上一张：直接应用“上一张”记录的那张图（本地/SMB 用原图，WebDAV 用缓存副本）。</summary>
